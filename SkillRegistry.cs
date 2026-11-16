@@ -1,6 +1,7 @@
 ﻿using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Data.Common; // 👈 必需：用于执行 SQL
 
 namespace RelayMcp
 {
@@ -13,7 +14,6 @@ namespace RelayMcp
         };
 
         private readonly IConfiguration _config;
-
 
         public SkillRegistry(IWebHostEnvironment env, IConfiguration config)
         {
@@ -54,8 +54,6 @@ namespace RelayMcp
                     Console.WriteLine($"读取文件 {file} 失败: {ex.Message}");
                 }
             }
-
-           
         }
 
         private SkillDefinition ToDefinition(string name, SimpleSkill s, string fileDomain)
@@ -75,10 +73,7 @@ namespace RelayMcp
                 Description = s.Desc,
                 Domain = s.Domain ?? fileDomain,
                 InputSchema = BuildSchema(s.Params),
-
-                // 👇 这里一定要用上面处理过 Token 的 backend，不能重新调 BuildBackend(s)！！！
                 Backend = backend,
-
                 Enabled = true
             };
         }
@@ -130,8 +125,19 @@ namespace RelayMcp
             if (s.Post is not null) return new() { Protocol = "rest", Method = "POST", Url = s.Post };
             if (s.Put is not null) return new() { Protocol = "rest", Method = "PUT", Url = s.Put };
             if (s.Delete is not null) return new() { Protocol = "rest", Method = "DELETE", Url = s.Delete };
+
+            if (s.SqlTemplate is not null)
+            {
+                return new()
+                {
+                    Protocol = "sql",
+                    DbAlias = s.DbAlias,
+                    SqlTemplate = s.SqlTemplate
+                };
+            }
+
             if (s.Soap is not null)
-            {                
+            {
                 return new()
                 {
                     Protocol = "soap",
@@ -177,7 +183,8 @@ namespace RelayMcp
             return skill.Backend?.Protocol switch
             {
                 "rest" => await ExecuteRestAsync(skill, args, httpFactory),
-                "soap" => await ExecuteSoapAsync(skill, args, httpFactory),               
+                "soap" => await ExecuteSoapAsync(skill, args, httpFactory),
+                "sql" => await ExecuteSqlTemplateAsync(skill, args), // 👈 走这里
                 _ => ExecResult.Fail("BACKEND_ERROR", "不支持的协议", 500)
             };
         }
@@ -198,7 +205,6 @@ namespace RelayMcp
 
         private static void InjectAuthHeaders(HttpRequestMessage request, BackendConfig backend)
         {
-            // 如果没有配置 Token 或认证类型，直接返回
             if (string.IsNullOrEmpty(backend.Token) || string.IsNullOrEmpty(backend.AuthType))
                 return;
 
@@ -213,7 +219,6 @@ namespace RelayMcp
             }
             else if (backend.AuthType.Equals("header", StringComparison.OrdinalIgnoreCase))
             {
-                // 如果是自定义 Header，TokenKey 就是 Header 的名字（比如 "X-Api-Key"）
                 var headerName = string.IsNullOrEmpty(backend.TokenKey) ? "X-Access-Token" : backend.TokenKey;
                 request.Headers.Add(headerName, backend.Token);
             }
@@ -224,7 +229,6 @@ namespace RelayMcp
             var url = skill.Backend!.Url!;
             var remaining = new Dictionary<string, object?>();
 
-            // 1. 解析 URL 路径参数
             if (args.ValueKind == JsonValueKind.Object)
             {
                 foreach (var prop in args.EnumerateObject())
@@ -239,32 +243,26 @@ namespace RelayMcp
 
             var client = httpFactory.CreateClient();
             var method = new HttpMethod(skill.Backend.Method ?? "GET");
-
-            // 2. 提前构建 HttpRequestMessage，方便统一注入 Header
             var request = new HttpRequestMessage(method, url);
 
-            // 3. 注入业务系统要求的鉴权 Token
             InjectAuthHeaders(request, skill.Backend);
 
             HttpResponseMessage resp;
 
-            // 4. 分发 GET 或 POST 等请求
             if (method == HttpMethod.Get)
             {
-                // 拼接剩余参数为 QueryString
                 var qs = string.Join("&", remaining.Select(kv =>
                     $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value?.ToString() ?? "")}"));
 
                 if (!string.IsNullOrEmpty(qs))
                 {
                     url += (url.Contains('?') ? "&" : "?") + qs;
-                    request.RequestUri = new Uri(url); // 更新请求地址
+                    request.RequestUri = new Uri(url);
                 }
                 resp = await client.SendAsync(request);
             }
             else
             {
-                // 序列化剩余参数为 JSON Body
                 var json = JsonSerializer.Serialize(remaining);
                 request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 resp = await client.SendAsync(request);
@@ -282,7 +280,6 @@ namespace RelayMcp
         {
             var body = skill.Backend!.SoapBody;
 
-            // 👇 核心魔法：如果没有写死 body，就自动拼装 XML
             if (string.IsNullOrEmpty(body) && !string.IsNullOrEmpty(skill.Backend.SoapMethod))
             {
                 var sb = new System.Text.StringBuilder();
@@ -291,7 +288,6 @@ namespace RelayMcp
                 sb.Append("<soapenv:Header/><soapenv:Body>");
                 sb.Append($"<tem:{skill.Backend.SoapMethod}>");
 
-                // 自动遍历参数并填入
                 if (args.ValueKind == JsonValueKind.Object)
                 {
                     foreach (var prop in args.EnumerateObject())
@@ -306,18 +302,15 @@ namespace RelayMcp
                 body = sb.ToString();
             }
 
-            // 如果既没有 body 也没有 method，报错
             if (string.IsNullOrEmpty(body))
                 return ExecResult.Fail("BACKEND_ERROR", "未配置 SOAP Body 或 Method", 500);
 
-            // 1. 如果配了模板，替换 SOAP XML 模板里的变量
             if (!string.IsNullOrEmpty(skill.Backend.SoapBody) && args.ValueKind == JsonValueKind.Object)
             {
                 foreach (var prop in args.EnumerateObject())
                     body = body.Replace("{" + prop.Name + "}", SecurityElement.Escape(prop.Value.ToString()));
             }
 
-            // 2. 构建请求
             var req = new HttpRequestMessage(HttpMethod.Post, skill.Backend.Url)
             {
                 Content = new StringContent(body, System.Text.Encoding.UTF8, "text/xml")
@@ -326,7 +319,6 @@ namespace RelayMcp
             if (!string.IsNullOrEmpty(skill.Backend.SoapAction))
                 req.Headers.Add("SOAPAction", skill.Backend.SoapAction);
 
-            // 3. 注入鉴权 Token
             InjectAuthHeaders(req, skill.Backend);
 
             var resp = await httpFactory.CreateClient().SendAsync(req);
@@ -338,10 +330,71 @@ namespace RelayMcp
             return ExecResult.Success(text);
         }
 
+        // 👇 新增：执行 SQL 模板（非静态方法，因为需要读 _config）
+        private async Task<ExecResult> ExecuteSqlTemplateAsync(SkillDefinition skill, JsonElement args)
+        {
+            var dbConfig = _config.GetSection($"DatabaseSettings:Connections:{skill.Backend!.DbAlias}");
+            var providerName = dbConfig["Provider"];
+            var connStr = dbConfig["ConnectionString"];
 
-        #region 兼容老式简单的返回结构的webservice       
+            if (string.IsNullOrEmpty(connStr) || string.IsNullOrEmpty(providerName))
+                return ExecResult.Fail("BACKEND_ERROR", $"数据库配置 {skill.Backend.DbAlias} 不存在", 500);
 
+            try
+            {
+                var factory = DbProviderFactories.GetFactory(providerName);
+                using var conn = factory.CreateConnection();
+                conn!.ConnectionString = connStr;
+                await conn.OpenAsync();
 
-        #endregion
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = skill.Backend.SqlTemplate;
+
+                // 安全参数化：把 {id} 替换为 @id，防止 SQL 注入
+                if (args.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in args.EnumerateObject())
+                    {
+                        var placeholder = "{" + prop.Name + "}";
+                        if (cmd.CommandText.Contains(placeholder))
+                        {
+                            cmd.CommandText = cmd.CommandText.Replace(placeholder, "@" + prop.Name);
+                            var p = cmd.CreateParameter();
+                            p.ParameterName = "@" + prop.Name;
+                            // 简单类型转换
+                            p.Value = prop.Value.ValueKind == JsonValueKind.Number ? prop.Value.GetDecimal() : prop.Value.ToString();
+                            cmd.Parameters.Add(p);
+                        }
+                    }
+                }
+
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                // 情况 1：非查询语句
+                if (reader.FieldCount == 0)
+                {
+                    return ExecResult.Success(new { type = "affectedRows", message = "执行成功", affectedRows = reader.RecordsAffected });
+                }
+
+                // 情况 2：查询结果
+                var dataList = new List<Dictionary<string, object>>();
+                int rowCount = 0;
+                while (await reader.ReadAsync() && rowCount < 100)
+                {
+                    var row = new Dictionary<string, object>();
+                    for (int i = 0; i < reader.FieldCount; i++)
+                        row[reader.GetName(i)] = reader.GetValue(i);
+                    dataList.Add(row);
+                    rowCount++;
+                }
+
+                if (dataList.Count == 1) return ExecResult.Success(new { type = "singleRow", data = dataList[0] });
+                return ExecResult.Success(new { type = "dataset", rowCount = dataList.Count, data = dataList });
+            }
+            catch (Exception ex)
+            {
+                return ExecResult.Fail("BACKEND_ERROR", $"SQL模板执行失败: {ex.Message}", 500);
+            }
+        }
     }
 }

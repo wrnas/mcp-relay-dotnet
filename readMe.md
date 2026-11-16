@@ -291,3 +291,57 @@ confirm_token：危险操作时的确认凭证（默认不填）。
  如果是查询数量，请注意不同数据库返回字段名的差异。
  如需执行修改操作，请严格按照工具返回的提示向用户请求确认。"
  ```
+
+ ## 🎯 七、 精准制导：配置固定的 SQL 模板查询
+
+除了让智能体自由发挥写 SQL（`ExecuteSql`）之外，在业务场景中，我们更推荐把**写好的、涉及多表关联的复杂 SQL**封装成技能。这样不仅能避免大模型产生幻觉，还能保证查询性能和业务逻辑的绝对准确。
+
+我们复用了现有的 `ExecuteSkill` 工具，底层新增了 `"sql"` 协议。
+
+### 1. 配置说明 (`skills/*.json`)
+
+在 JSON 配置文件中，使用 `"sql"` 指定 SQL 模板，使用 `"db_alias"` 指定目标数据库，使用 `{参数名}` 作为占位符。
+
+**示例：查询指定部门的在职员工（带条件）**
+```json
+{
+  "hr_query_active_users_by_dept": {
+    "desc": "按部门 ID 查询所有在职员工及所属部门名称",
+    "params": {
+      "deptId": "int 部门ID"
+    },
+    "sql": "SELECT u.name, d.dept_name FROM t_user u LEFT JOIN t_dept d ON u.dept_id = d.id WHERE u.status = 1 AND d.id = {deptId}",
+    "db_alias": "HR_MYSQL"
+  }
+}
+```
+示例：获取全表统计（无参数）
+```json
+{
+  "hr_get_user_count": {
+    "desc": "获取全系统用户总数",
+    "sql": "SELECT COUNT(*) as total FROM t_user",
+    "db_alias": "HR_MYSQL"
+  }
+}
+```
+### 2. 底层安全机制：参数化查询防注入
+当你使用 {参数名} 占位符时，.NET 网关底层并不是简单地进行字符串替换。
+在执行前，网关会自动将 {deptId} 转换为 ADO.NET 的参数化查询 @deptId，并为其绑定值。这从根本上杜绝了 SQL 注入的风险。
+
+### 3. 智能体的调用流程
+* 用户问：“帮我查一下技术部（ID 为 5）的员工名单。”
+* 智能体调用 GetSkillList("查询员工")。
+* 发现技能 hr_query_active_users_by_dept。
+* 智能体调用 ExecuteSkill，传入参数：
+```json
+{
+  "tool_name": "hr_query_active_users_by_dept",
+  "args": { "deptId": 5 }
+}
+```
+* 网关执行 SQL，返回标准的 JSON 数据集给大模型进行总结。
+> 提示：对于核心的、经常复用的业务查询，强烈建议采用这种“配置模板”的方式，而不是让大模型通过 ExecuteSql 自行拼装。前者稳定可控，后者灵活但存在风险。
+```text
+复制这段内容放入 README 后，你整个 SQL 模块的介绍就非常完整了：既有给大模型自由探索的“动态执行”，也有保障业务绝对准确的“模板配置”。
+```

@@ -24,6 +24,9 @@ namespace RelayMcp
 
         public string? SoapMethod { get; set; }
         public string? SoapNamespace { get; set; }
+
+        public string? SqlTemplate { get; set; } // 新增
+        public string? DbAlias { get; set; }     // 新增
     }
 
     // 内部运行的实体类
@@ -73,6 +76,9 @@ namespace RelayMcp
 
         public string? SoapMethod { get; set; }    // 方法名，比如 "RemoveMaillist2013"
         public string? SoapNamespace { get; set; } // 命名空间，比如 "http://Exchange2013Maillist/"
+
+        public string? SqlTemplate { get; set; } // 固定的 SQL 模板
+        public string? DbAlias { get; set; }     // 数据库别名
     }
 
     public class ExecuteRequest
