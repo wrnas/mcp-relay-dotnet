@@ -5,15 +5,15 @@
     "get": "http://10.0.0.21:8080/api/orders/{order_id}"
   },
   "ws_add_maillist": {
-    "desc": "新增邮件列表",
+    "desc": "新增管理信息",
     "params": {
       "groupname": "string 组名",
       "manage": "string 管理员",
       "password": "string 密码"
     },
-    "soap": "http://172.16.25.195:8022/Exchange2013Maillist.asmx",
-    "action": "http://Exchange2013Maillist/AddNewMaillist2013",
-    "soap_method": "AddNewMaillist2013",
-    "soap_namespace": "http://Exchange2013Maillist/"
+    "soap": "http://192.168.0.111:8022/User.asmx",
+    "action": "http://AddNewUser",
+    "soap_method": "AddNewUser",
+    "soap_namespace": "http://AddNewUser/"
   }
 }
