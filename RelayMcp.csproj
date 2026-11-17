@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.34" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.4.22" />
     <PackageReference Include="MySqlConnector" Version="3.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.6" />
   </ItemGroup>

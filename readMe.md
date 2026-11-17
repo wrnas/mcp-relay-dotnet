@@ -382,3 +382,83 @@ confirm_token：危险操作时的确认凭证（默认不填）。
 ```text
 复制这段内容放入 README 后，你整个 SQL 模块的介绍就非常完整了：既有给大模型自由探索的“动态执行”，也有保障业务绝对准确的“模板配置”。
 ```
+## 🖥️ 八、 Windows 远程运维：PowerShell 执行引擎
+
+在企业内网中，大量的老旧系统（如 Exchange、AD 域控）或 Windows Server 基础运维，最通用的操作方式不是 REST API，而是 **PowerShell**。
+
+为此，Mcp-Relay.Net 内置了 **PowerShell 远程执行引擎**。你**完全不需要**在目标服务器（如 Exchange 服务器）上部署任何网关代码，只需保证网络互通并开启 WinRM，即可通过本网关远程调用 PowerShell 命令。
+
+### 1. 原理与前提条件
+
+*   **通信原理**：网关通过 `WinRM` (Windows Remote Management) 协议建立远程 Runspace 会话，将 JSON 中配置的脚本发送到目标服务器执行，并将返回的 `PSObject` 自动转换为干净的 JSON 返回给智能体。
+*   **目标服务器准备**：必须在目标 Windows 服务器（如 Exchange 2013）上以管理员身份运行 PowerShell 并执行以下命令开启远程管理：
+    ```powershell
+    Enable-PSRemoting -Force
+    ```
+(确保防火墙放行 5985 (HTTP) 或 5986 (HTTPS) 端口)
+###  2. 网关配置 (appsettings.json)
+为了保证凭证安全，远程服务器的地址和账号密码统一存放在网关的 appsettings.json 中：
+```json
+{
+  "PowerShellSettings": {
+    "ExchangeServerUrl": "http://172.16.25.xxx:5985/wsman", 
+    "Username": "your_domain\\administrator",
+    "Password": "your_password"
+  }
+}
+```
+###  3. 技能配置示例 (skills/exchange.json)
+在 JSON 配置文件中，指定 "protocol": "powershell"，并在 "script" 字段中写入固定的 PowerShell 模板。使用 {参数名} 作为动态占位符。
+*   **示例 1：查询 Exchange 用户信息（带参数）**
+```json
+{
+  "exchange_check_user": {
+    "desc": "检查 Exchange 用户是否存在，并返回其基本信息",
+    "params": {
+      "identity": "string 用户账号（如：domain\\zhangsan 或 邮箱地址）"
+    },
+    "protocol": "powershell",
+    "script": "Get-User -Identity '{identity}' | Select-Object Name, DistinguishedName, Enabled"
+  }
+}
+```
+*   **示例 2：查询 Exchange 邮箱权限（多参数）**
+```json
+{
+  "exchange_check_mailbox_permission": {
+    "desc": "检查用户对指定邮箱的完全访问权限",
+    "params": {
+      "identity": "string 目标邮箱",
+      "user": "string 被检查的用户"
+    },
+    "protocol": "powershell",
+    "script": "Get-MailboxPermission -Identity '{identity}' -User '{user}' | Select-Object Identity, User, AccessRights"
+  }
+}
+```
+*   **示例 3：基础服务器磁盘空间查询（跨服务器）**
+
+```json
+{
+  "check_disk_space": {
+    "desc": "查询指定Windows服务器的磁盘空间使用情况",
+    "params": {
+      "server_ip": "string 服务器IP地址"
+    },
+    "protocol": "powershell",
+    "script": "Invoke-Command -ComputerName '{server_ip}' -ScriptBlock { Get-CimInstance Win32_LogicalDisk -Filter \"DriveType=3\" | Select-Object DeviceID, @{Name='FreeGB';Expression={[math]::Round($_.FreeSpace/1GB,2)}}, @{Name='TotalGB';Expression={[math]::Round($_.Size/1GB,2)}} }"
+  }
+}
+```
+
+###  4. ⚠️ 核心安全规范（极其重要）
+* 仅限白名单模板：绝对不要向智能体暴露可以随意执行任意 PowerShell 代码的通用工具。只能像上述示例一样，把命令写死在 JSON 的 "script" 字段中。
+
+* 强制只读优先：在运维场景，尽量只封装 Get-*（查询）命令。如果需要重启服务或修改配置，请务必结合之前提到的“二次确认”机制。
+
+* 防范命令注入：在编写 "script" 时，务必用单引号包裹占位符（如 -Identity '{identity}'），底层 C# 代码在执行前会对传入的参数进行转义，防止大模型生成恶意拼接字符串。
+
+* 网关部署位置：将 Mcp-Relay.Net 部署在独立的跳板机或应用服务器上，不要直接部署在核心的 Exchange 或 AD 域控服务器上，降低风险。
+
+
+

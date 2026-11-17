@@ -90,10 +90,15 @@ namespace RelayMcp
         /// </summary>
         public string? DbAlias { get; set; }
 
+        // 用于接收 JSON 中的 PowerShell 脚本
+        public string? Script { get; set; }
+
         /// <summary>
         /// 技能开关。默认为 true。若设为 false，智能体将无法搜索或调用此技能。
         /// </summary>
         public bool Enabled { get; set; } = true;
+
+
     }
 
     /// <summary>
@@ -212,6 +217,12 @@ namespace RelayMcp
         /// 执行固定 SQL 时使用的目标数据库别名。
         /// </summary>
         public string? DbAlias { get; set; }
+
+        // 用于存储 PowerShell 脚本模板
+        public string? ScriptTemplate { get; set; }
+
+        // 如果不同脚本需要在不同的服务器上执行，可以在这里加服务器地址，否则在代码里全局读配置
+        public string? TargetServer { get; set; }
     }
 
     /// <summary>

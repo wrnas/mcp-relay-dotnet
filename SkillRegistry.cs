@@ -2,6 +2,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Data.Common;
+using System.Management.Automation;
+using System.Management.Automation.Runspaces;
 
 namespace RelayMcp
 {
@@ -191,6 +193,12 @@ namespace RelayMcp
                 return new() { Protocol = "sql", DbAlias = s.DbAlias, SqlTemplate = s.SqlTemplate };
             }
 
+            //识别 PowerShell 脚本
+            if (s.Script is not null)
+            {
+                return new() { Protocol = "powershell", ScriptTemplate = s.Script };
+            }
+
             if (s.Soap is not null)
             {
                 return new()
@@ -255,6 +263,7 @@ namespace RelayMcp
                 "rest" => await ExecuteRestAsync(skill, args, httpFactory),
                 "soap" => await ExecuteSoapAsync(skill, args, httpFactory),
                 "sql" => await ExecuteSqlTemplateAsync(skill, args),
+                "powershell" => await ExecutePowerShellAsync(skill, args),                 
                 _ => ExecResult.Fail("BACKEND_ERROR", "不支持的协议", 500)
             };
         }
@@ -459,5 +468,66 @@ namespace RelayMcp
                 return ExecResult.Fail("BACKEND_ERROR", $"SQL模板执行失败: {ex.Message}", 500);
             }
         }
+
+        #region PowerShell
+        private async Task<ExecResult> ExecutePowerShellAsync(SkillDefinition skill, JsonElement args)
+        {
+            try
+            {
+                // 1. 获取配置的凭据
+                var exUrl = _config["PowerShellSettings:ExchangeServerUrl"];
+                var user = _config["PowerShellSettings:Username"];
+                var pwd = _config["PowerShellSettings:Password"];
+
+                if (string.IsNullOrEmpty(exUrl) || string.IsNullOrEmpty(user))
+                    return ExecResult.Fail("BACKEND_ERROR", "未配置 Exchange 远程连接信息", 500);
+
+                // 2. 构建凭据和连接信息
+                var securePwd = new SecureString();
+                foreach (char c in pwd) securePwd.AppendChar(c);
+                var credential = new PSCredential(user, securePwd);
+
+                // 构建远程连接对象
+                var connectionInfo = new WSManConnectionInfo(new Uri(exUrl), "http://schemas.microsoft.com/powershell/Microsoft.Exchange", credential);
+
+                // 3. 创建远程 Runspace
+                using var runspace = RunspaceFactory.CreateRunspace(connectionInfo);
+                runspace.Open();
+
+                using var ps = PowerShell.Create();
+                ps.Runspace = runspace;
+
+                // 4. 替换参数并执行
+                var script = skill.Backend!.ScriptTemplate;
+                if (args.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in args.EnumerateObject())
+                    {
+                        // 简单的参数替换（注意防范 PowerShell 注入，生产环境建议对参数做 Base64 编码后解码）
+                        script = script.Replace("{" + prop.Name + "}", prop.Value.ToString());
+                    }
+                }
+
+                ps.AddScript(script);
+                var results = ps.Invoke();
+
+                if (ps.HadErrors)
+                {
+                    var errors = string.Join("; ", ps.Streams.Error.Select(e => e.ToString()));
+                    return ExecResult.Fail("POWERSHELL_ERROR", errors, 500);
+                }
+
+                // 5. 将 PSObject 转换为干净的 JSON
+                var output = results.Select(r => r.BaseObject).ToList();
+                if (output.Count == 0) return ExecResult.Success(new { message = "查询成功，但无结果返回" });
+
+                return ExecResult.Success(output);
+            }
+            catch (Exception ex)
+            {
+                return ExecResult.Fail("EXECUTION_ERROR", ex.Message, 500);
+            }
+        }
+        #endregion
     }
 }
