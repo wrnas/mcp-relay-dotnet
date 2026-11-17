@@ -1,58 +1,119 @@
 ﻿using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Data.Common; // 👈 必需：用于执行 SQL
+using System.Data.Common;
 
 namespace RelayMcp
 {
     public class SkillRegistry
     {
-        private readonly Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
+        // 👈 去掉了 readonly，为了在热加载时能安全替换（写时复制机制）
+        private Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
         private static readonly JsonSerializerOptions JsonOpts = new()
         {
             PropertyNameCaseInsensitive = true
         };
 
         private readonly IConfiguration _config;
+        private readonly string _skillsDir;
+        private readonly object _lockObj = new object(); // 用于防止并发读写冲突
 
         public SkillRegistry(IWebHostEnvironment env, IConfiguration config)
         {
             _config = config;
-            // 优先找项目根目录，找不到就找程序运行目录
-            var dir = Path.Combine(env.ContentRootPath, "skills");
-            if (!Directory.Exists(dir))
+
+            // 确定 skills 目录
+            _skillsDir = Path.Combine(env.ContentRootPath, "skills");
+            if (!Directory.Exists(_skillsDir))
             {
-                dir = Path.Combine(AppContext.BaseDirectory, "skills");
+                _skillsDir = Path.Combine(AppContext.BaseDirectory, "skills");
             }
 
-            if (!Directory.Exists(dir))
+            if (!Directory.Exists(_skillsDir))
             {
-                Console.WriteLine($"警告: 找不到 skills 目录 {dir}");
+                Console.WriteLine($"警告: 找不到 skills 目录 {_skillsDir}");
                 return;
             }
 
-            Console.WriteLine($"正在加载 skills 目录: {dir}");
+            // 1. 启动时首次加载所有 JSON
+            LoadAllSkills();
 
-            foreach (var file in Directory.GetFiles(dir, "*.json"))
+            // 2. 👇 开启文件监听（热加载核心）
+            try
             {
-                try
-                {
-                    var json = File.ReadAllText(file);
-                    // 直接反序列化为字典
-                    var dict = JsonSerializer.Deserialize<Dictionary<string, SimpleSkill>>(json, JsonOpts);
-                    if (dict is null) continue;
+                var watcher = new FileSystemWatcher(_skillsDir, "*.json");
+                // 监听最后修改时间、文件名和目录名
+                watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName;
 
-                    var fileDomain = Path.GetFileNameWithoutExtension(file);
-                    foreach (var kvp in dict)
-                    {
-                        _skills[kvp.Key] = ToDefinition(kvp.Key, kvp.Value, fileDomain);
-                    }
-                    Console.WriteLine($"成功加载文件: {file}, 包含 {dict.Count} 个技能");
-                }
-                catch (Exception ex)
+                // 绑定事件
+                watcher.Changed += OnFileChanged;
+                watcher.Created += OnFileChanged;
+                watcher.Deleted += OnFileChanged;
+                watcher.Renamed += OnFileChanged;
+
+                watcher.EnableRaisingEvents = true;
+                Console.WriteLine($"👀 已开启技能热加载监听: {_skillsDir}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"启动文件监听失败: {ex.Message}");
+            }
+        }
+
+        // 👇 文件变化时的回调
+        private void OnFileChanged(object sender, FileSystemEventArgs e)
+        {
+            // 防抖处理：操作系统保存文件时经常会触发多次事件
+            // 稍微等待 200 毫秒，等文件写入完成
+            Thread.Sleep(200);
+
+            Console.WriteLine($"\n🔄 检测到配置文件变化 [{e.ChangeType}]：{e.Name}，正在重新加载...");
+            LoadAllSkills();
+        }
+
+        // 👇 抽离出的独立加载逻辑
+        private void LoadAllSkills()
+        {
+            // 创建一个新的字典
+            var newSkills = new Dictionary<string, SkillDefinition>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                foreach (var file in Directory.GetFiles(_skillsDir, "*.json"))
                 {
-                    Console.WriteLine($"读取文件 {file} 失败: {ex.Message}");
+                    try
+                    {
+                        // 读取时加上共享锁，防止文件被占用
+                        using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        using var sr = new StreamReader(fs);
+                        var json = sr.ReadToEnd();
+
+                        var dict = JsonSerializer.Deserialize<Dictionary<string, SimpleSkill>>(json, JsonOpts);
+                        if (dict is null) continue;
+
+                        var fileDomain = Path.GetFileNameWithoutExtension(file);
+                        foreach (var kvp in dict)
+                        {
+                            newSkills[kvp.Key] = ToDefinition(kvp.Key, kvp.Value, fileDomain);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"读取文件 {file} 失败: {ex.Message}");
+                    }
                 }
+
+                // 👈 核心：原子替换。在锁的保护下，把新字典替换给老字典
+                lock (_lockObj)
+                {
+                    _skills = newSkills;
+                }
+
+                Console.WriteLine($"✅ 技能加载/重载完成，当前共有 {newSkills.Count} 个技能。");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"加载目录失败: {ex.Message}");
             }
         }
 
@@ -63,7 +124,6 @@ namespace RelayMcp
             {
                 backend.AuthType = s.Auth;
                 backend.TokenKey = s.TokenKey;
-                // 去 appsettings.json 里找真实的 token
                 backend.Token = _config[$"Tokens:{s.TokenKey}"];
             }
 
@@ -128,12 +188,7 @@ namespace RelayMcp
 
             if (s.SqlTemplate is not null)
             {
-                return new()
-                {
-                    Protocol = "sql",
-                    DbAlias = s.DbAlias,
-                    SqlTemplate = s.SqlTemplate
-                };
+                return new() { Protocol = "sql", DbAlias = s.DbAlias, SqlTemplate = s.SqlTemplate };
             }
 
             if (s.Soap is not null)
@@ -152,26 +207,41 @@ namespace RelayMcp
             return null;
         }
 
+        // 👇 给读取字典的方法加上锁，确保在热加载替换字典的一瞬间，不会报空引用异常
         public SkillDefinition? Get(string name)
-            => _skills.TryGetValue(name, out var s) ? s : null;
+        {
+            lock (_lockObj)
+            {
+                return _skills.TryGetValue(name, out var s) ? s : null;
+            }
+        }
 
         public List<SkillSummary> Search(string query, int topK)
         {
             var q = query?.Trim() ?? "";
-            IEnumerable<SkillDefinition> all = _skills.Values.Where(s => s.Enabled);
-            if (!string.IsNullOrEmpty(q))
+            lock (_lockObj)
             {
-                all = all.Where(s =>
-                    s.ToolName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                    (s.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                    (s.Domain?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+                IEnumerable<SkillDefinition> all = _skills.Values.Where(s => s.Enabled);
+                if (!string.IsNullOrEmpty(q))
+                {
+                    all = all.Where(s =>
+                        s.ToolName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                        (s.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                        (s.Domain?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+                }
+                return all.Take(topK).Select(s => new SkillSummary(s.ToolName, s.Description, s.Domain)).ToList();
             }
-            return all.Take(topK).Select(s => new SkillSummary(s.ToolName, s.Description, s.Domain)).ToList();
         }
 
         public async Task<ExecResult> ExecuteAsync(string toolName, JsonElement args, IHttpClientFactory httpFactory)
         {
-            if (!_skills.TryGetValue(toolName, out var skill))
+            SkillDefinition? skill;
+            lock (_lockObj)
+            {
+                _skills.TryGetValue(toolName, out skill);
+            }
+
+            if (skill == null)
                 return ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 不存在", 404);
             if (!skill.Enabled)
                 return ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 已禁用", 404);
@@ -184,7 +254,7 @@ namespace RelayMcp
             {
                 "rest" => await ExecuteRestAsync(skill, args, httpFactory),
                 "soap" => await ExecuteSoapAsync(skill, args, httpFactory),
-                "sql" => await ExecuteSqlTemplateAsync(skill, args), // 👈 走这里
+                "sql" => await ExecuteSqlTemplateAsync(skill, args),
                 _ => ExecResult.Fail("BACKEND_ERROR", "不支持的协议", 500)
             };
         }
@@ -209,9 +279,7 @@ namespace RelayMcp
                 return;
 
             if (backend.AuthType.Equals("bearer", StringComparison.OrdinalIgnoreCase))
-            {
                 request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", backend.Token);
-            }
             else if (backend.AuthType.Equals("basic", StringComparison.OrdinalIgnoreCase))
             {
                 var bytes = System.Text.Encoding.UTF8.GetBytes(backend.Token);
@@ -330,7 +398,6 @@ namespace RelayMcp
             return ExecResult.Success(text);
         }
 
-        // 👇 新增：执行 SQL 模板（非静态方法，因为需要读 _config）
         private async Task<ExecResult> ExecuteSqlTemplateAsync(SkillDefinition skill, JsonElement args)
         {
             var dbConfig = _config.GetSection($"DatabaseSettings:Connections:{skill.Backend!.DbAlias}");
@@ -350,7 +417,6 @@ namespace RelayMcp
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = skill.Backend.SqlTemplate;
 
-                // 安全参数化：把 {id} 替换为 @id，防止 SQL 注入
                 if (args.ValueKind == JsonValueKind.Object)
                 {
                     foreach (var prop in args.EnumerateObject())
@@ -361,7 +427,6 @@ namespace RelayMcp
                             cmd.CommandText = cmd.CommandText.Replace(placeholder, "@" + prop.Name);
                             var p = cmd.CreateParameter();
                             p.ParameterName = "@" + prop.Name;
-                            // 简单类型转换
                             p.Value = prop.Value.ValueKind == JsonValueKind.Number ? prop.Value.GetDecimal() : prop.Value.ToString();
                             cmd.Parameters.Add(p);
                         }
@@ -370,13 +435,11 @@ namespace RelayMcp
 
                 using var reader = await cmd.ExecuteReaderAsync();
 
-                // 情况 1：非查询语句
                 if (reader.FieldCount == 0)
                 {
                     return ExecResult.Success(new { type = "affectedRows", message = "执行成功", affectedRows = reader.RecordsAffected });
                 }
 
-                // 情况 2：查询结果
                 var dataList = new List<Dictionary<string, object>>();
                 int rowCount = 0;
                 while (await reader.ReadAsync() && rowCount < 100)
