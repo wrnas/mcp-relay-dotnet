@@ -133,8 +133,8 @@ namespace RelayMcp
                 Description = s.Desc,
                 Domain = s.Domain ?? fileDomain,
                 InputSchema = BuildSchema(s.Params),
-                Backend = backend,
-                Enabled = true
+                Backend = backend,               
+                Enabled = s.Enabled
             };
         }
 

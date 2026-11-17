@@ -2,6 +2,7 @@
   "erp_get_order": {
     "desc": "按订单号查询 ERP 订单详情",
     "params": { "order_id": "string 订单号" },
+    "enabled": true,
     "get": "http://10.0.0.21:8080/api/orders/{order_id}"
   },
   "erp_create_order": {

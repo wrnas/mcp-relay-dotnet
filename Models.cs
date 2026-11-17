@@ -3,42 +3,138 @@ using System.Text.Json.Serialization;
 
 namespace RelayMcp
 {
-    // 对应 JSON 里的每一个 key (如 "erp_get_order")
+    /// <summary>
+    /// 对应 skills/xxx.json 文件里的每一个键值对（技能配置）。
+    /// 这里的属性名与 JSON 里的字段名对应，用于接收配置。
+    /// </summary>
     public class SimpleSkill
     {
-        public string? Desc { get; set; }
-        public Dictionary<string, string>? Params { get; set; }
-        public string? Domain { get; set; }
-        public string? Get { get; set; }
-        public string? Post { get; set; }
-        public string? Put { get; set; }
-        public string? Delete { get; set; }
-        public string? Soap { get; set; }
-        public string? Action { get; set; }
-        public string? Body { get; set; }
         /// <summary>
-        /// 为接口认证保留
+        /// 技能的描述，供大模型理解该接口的用途（如："按订单号查询 ERP 订单详情"）。
+        /// </summary>
+        public string? Desc { get; set; }
+
+        /// <summary>
+        /// 技能的参数定义。键为参数名，值为 "类型 描述" 格式（如："order_id": "string 订单号"）。
+        /// 前缀带 "?" 表示可选参数（如："?int 页码"）。
+        /// </summary>
+        public Dictionary<string, string>? Params { get; set; }
+
+        /// <summary>
+        /// 业务域（如 "erp"、"oa"）。不填则默认取 JSON 文件名。
+        /// </summary>
+        public string? Domain { get; set; }
+
+        /// <summary>
+        /// REST 接口配置：填写即为 GET 请求，值填完整 URL（支持 {参数名} 占位符）。
+        /// </summary>
+        public string? Get { get; set; }
+
+        /// <summary>
+        /// REST 接口配置：填写即为 POST 请求。
+        /// </summary>
+        public string? Post { get; set; }
+
+        /// <summary>
+        /// REST 接口配置：填写即为 PUT 请求。
+        /// </summary>
+        public string? Put { get; set; }
+
+        /// <summary>
+        /// REST 接口配置：填写即为 DELETE 请求。
+        /// </summary>
+        public string? Delete { get; set; }
+
+        /// <summary>
+        /// SOAP WebService 接口地址（如 "http://.../User.asmx"）。
+        /// </summary>
+        public string? Soap { get; set; }
+
+        /// <summary>
+        /// SOAP 请求头中的 SOAPAction（如 "http://tempuri.org/AddUser"）。
+        /// </summary>
+        public string? Action { get; set; }
+
+        /// <summary>
+        /// 用于复杂 SOAP 接口的全手动拼装。如果填了此项，会直接替换 {参数名} 后发送。
+        /// </summary>
+        public string? Body { get; set; }
+
+        /// <summary>
+        /// 鉴权类型。支持："bearer"、"basic"、"header"（需配合 token_key 使用）。
         /// </summary>
         public string? Auth { get; set; }
+
+        /// <summary>
+        /// 凭证键名。程序启动时会拿这个值去 appsettings.json 的 "Tokens" 节点下读取真实 Token。
+        /// </summary>
         public string? TokenKey { get; set; }
 
+        /// <summary>
+        /// 用于简单 SOAP 接口的半自动拼装：指定要调用的方法名（如 "AddUser"）。
+        /// </summary>
         public string? SoapMethod { get; set; }
+
+        /// <summary>
+        /// 用于简单 SOAP 接口的半自动拼装：指定命名空间（如 "http://tempuri.org/"）。
+        /// </summary>
         public string? SoapNamespace { get; set; }
 
-        public string? SqlTemplate { get; set; } // 新增
-        public string? DbAlias { get; set; }     // 新增
+        /// <summary>
+        /// 固定的 SQL 模板。底层使用参数化查询防注入（如 "SELECT * FROM Users WHERE id = {id}"）。
+        /// </summary>
+        public string? SqlTemplate { get; set; }
+
+        /// <summary>
+        /// 目标数据库别名，需与 appsettings.json 中的 DatabaseSettings:Connections 下的键名对应。
+        /// </summary>
+        public string? DbAlias { get; set; }
+
+        /// <summary>
+        /// 技能开关。默认为 true。若设为 false，智能体将无法搜索或调用此技能。
+        /// </summary>
+        public bool Enabled { get; set; } = true;
     }
 
-    // 内部运行的实体类
+    /// <summary>
+    /// 内部运行实体。由 SimpleSkill 经过解析、补全信息后生成，存入内存字典供实际调度使用。
+    /// </summary>
     public class SkillDefinition
     {
+        /// <summary>
+        /// 技能唯一标识（即 JSON 文件中的 Key 名）。
+        /// </summary>
         public string ToolName { get; set; } = "";
+
+        /// <summary>
+        /// 技能描述（直接取自 SimpleSkill.Desc）。
+        /// </summary>
         public string? Description { get; set; }
+
+        /// <summary>
+        /// 所属业务域。
+        /// </summary>
         public string? Domain { get; set; }
+
+        /// <summary>
+        /// 动态生成的 JSON Schema，供智能体识别参数格式。
+        /// </summary>
         public JsonElement InputSchema { get; set; }
+
+        /// <summary>
+        /// 底层执行配置（包含了真实的 URL、Token、SQL 模板等）。
+        /// </summary>
         public BackendConfig? Backend { get; set; }
+
+        /// <summary>
+        /// 技能启用状态。
+        /// </summary>
         public bool Enabled { get; set; } = true;
 
+        /// <summary>
+        /// 将内部实体转化为大模型可见的“技能详情”。
+        /// 注意：这里刻意隐藏了 Backend 中的真实 URL、Token 和 SQL 模板，确保安全。
+        /// </summary>
         public object ToDetailDto() => new
         {
             tool_name = ToolName,
@@ -49,16 +145,39 @@ namespace RelayMcp
         };
     }
 
+    /// <summary>
+    /// 解析后的底层执行配置，供网关发起实际请求时使用。
+    /// </summary>
     public class BackendConfig
     {
-        public string? Protocol { get; set; }   // 协议类型：rest 或 soap
-        public string? Method { get; set; }     // HTTP 请求方法：GET/POST/PUT/DELETE（仅 REST 有效）
-        public string? Url { get; set; }        // 后端接口的完整 URL
-        public string? SoapAction { get; set; } // SOAP 协议的 SOAPAction 请求头
-        public string? SoapBody { get; set; }   // SOAP 协议的 XML 请求体模板
+        /// <summary>
+        /// 协议类型。由解析器根据配置自动识别："rest"、"soap" 或 "sql"。
+        /// </summary>
+        public string? Protocol { get; set; }
 
         /// <summary>
-        /// 认证类型。支持："bearer"（标准 Bearer Token）、"basic"（Base64 账号密码）、"header"（自定义请求头）
+        /// HTTP 方法（GET/POST/PUT/DELETE），仅在 Protocol 为 "rest" 时生效。
+        /// </summary>
+        public string? Method { get; set; }
+
+        /// <summary>
+        /// 后端接口的完整 URL（已替换/准备好路径参数）。
+        /// </summary>
+        public string? Url { get; set; }
+
+        /// <summary>
+        /// SOAP 协议的 SOAPAction 请求头。
+        /// </summary>
+        public string? SoapAction { get; set; }
+
+        /// <summary>
+        /// 全手动写死的 SOAP XML 报文模板。
+        /// </summary>
+        public string? SoapBody { get; set; }
+
+        /// <summary>
+        /// 鉴权类型（对应 JSON 的 auth）。
+        /// 支持："bearer"（标准 Bearer Token）、"basic"（Base64 账号密码）、"header"（自定义请求头）。
         /// </summary>
         public string? AuthType { get; set; }
 
@@ -74,27 +193,69 @@ namespace RelayMcp
         /// </summary>
         public string? TokenKey { get; set; }
 
-        public string? SoapMethod { get; set; }    // 方法名，比如 "RemoveMaillist2013"
-        public string? SoapNamespace { get; set; } // 命名空间，比如 "http://Exchange2013Maillist/"
+        /// <summary>
+        /// 半自动拼装 SOAP 报文时使用的方法名（如 "RemoveUser"）。
+        /// </summary>
+        public string? SoapMethod { get; set; }
 
-        public string? SqlTemplate { get; set; } // 固定的 SQL 模板
-        public string? DbAlias { get; set; }     // 数据库别名
+        /// <summary>
+        /// 半自动拼装 SOAP 报文时使用的命名空间（如 "http://MyWebService/"）。
+        /// </summary>
+        public string? SoapNamespace { get; set; }
+
+        /// <summary>
+        /// 执行固定 SQL 时使用的模板语句。
+        /// </summary>
+        public string? SqlTemplate { get; set; }
+
+        /// <summary>
+        /// 执行固定 SQL 时使用的目标数据库别名。
+        /// </summary>
+        public string? DbAlias { get; set; }
     }
 
+    /// <summary>
+    /// 接收来自 MCP 端 ExecuteSkill 请求的数据模型。
+    /// </summary>
     public class ExecuteRequest
     {
+        /// <summary>
+        /// 要执行的技能名称（必须是 JSON 中配置过的 Key）。
+        /// 因 MCP 侧传过来的是 snake_case，所以必须使用 JsonPropertyName 映射。
+        /// </summary>
         [JsonPropertyName("tool_name")]
         public string ToolName { get; set; } = "";
 
+        /// <summary>
+        /// 大模型填写的参数对象。
+        /// </summary>
         [JsonPropertyName("args")]
         public JsonElement Args { get; set; }
     }
 
+    /// <summary>
+    /// 返回给大模型的技能摘要信息（用于 GetSkillList）。
+    /// </summary>
     public record SkillSummary(string tool_name, string? description, string? domain);
 
+    /// <summary>
+    /// 网关内部统一的标准执行结果模型。
+    /// </summary>
+    /// <param name="Ok">是否执行成功</param>
+    /// <param name="Data">成功时返回的数据内容</param>
+    /// <param name="ErrorType">失败时的错误类型（如 NOT_FOUND, INVALID_PARAMS, BACKEND_ERROR 等）</param>
+    /// <param name="Message">失败时的具体错误提示信息</param>
+    /// <param name="Code">HTTP 状态码</param>
     public record ExecResult(bool Ok, object? Data, string? ErrorType, string? Message, int Code)
     {
+        /// <summary>
+        /// 构造一个成功的返回结果。
+        /// </summary>
         public static ExecResult Success(object? data) => new(true, data, null, null, 200);
+
+        /// <summary>
+        /// 构造一个失败的返回结果。
+        /// </summary>
         public static ExecResult Fail(string errorType, string message, int code)
             => new(false, null, errorType, message, code);
     }
