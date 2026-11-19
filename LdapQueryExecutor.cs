@@ -139,13 +139,17 @@ public sealed class LdapQueryExecutor
         };
         var limit = Math.Clamp(section.GetValue("MaxResults", 100), 1, 500);
         var seconds = Math.Clamp(section.GetValue("TimeoutSeconds", 15), 2, 60);
+        // 仅供隔离的开发测试环境使用；未配置时默认严格验证 LDAPS 证书。
+        var allowUntrustedCertificate = section.GetValue("AllowUntrustedCertificate", false);
+        if (allowUntrustedCertificate)
+            _logger.LogWarning("AD LDAP 服务器别名 {Server} 已跳过 LDAPS 证书验证（仅供测试，不适用于生产）", alias);
 
         try
         {
             // System.DirectoryServices.Protocols executes synchronously. Keep it off the request thread.
             var result = await Task.Run(() => Search(host, section.GetValue("Port", 636), user,
                 password, queryDn, filter, scope, skill.LdapAttributes!, limit, seconds,
-                !denied.Contains("distinguishedName")));
+                !denied.Contains("distinguishedName"), allowUntrustedCertificate));
             return ExecResult.Success(new
             {
                 server = skill.LdapServer,
@@ -180,7 +184,7 @@ public sealed class LdapQueryExecutor
 
     private static List<Dictionary<string, object?>> Search(string host, int port, string username, string password,
         string dn, string filter, SearchScope scope, List<string> attrs, int limit, int seconds,
-        bool includeDistinguishedName)
+        bool includeDistinguishedName, bool allowUntrustedCertificate)
     {
         using var connection = new LdapConnection(new LdapDirectoryIdentifier(host, port));
         connection.AuthType = AuthType.Basic;
@@ -188,8 +192,9 @@ public sealed class LdapQueryExecutor
         connection.SessionOptions.ProtocolVersion = 3;
         connection.SessionOptions.SecureSocketLayer = true;
         connection.SessionOptions.ReferralChasing = ReferralChasingOptions.None;
-        // Do NOT use VerifyServerCertificate override: the server certificate must chain
-        // to a trusted CA and match the configured Host.
+        // 仅在显式启用测试开关时跳过证书验证；默认保留正常的证书链及主机名验证。
+        if (allowUntrustedCertificate)
+            connection.SessionOptions.VerifyServerCertificate = (_, _) => true;
         connection.Timeout = TimeSpan.FromSeconds(seconds);
         try
         {
@@ -264,7 +269,11 @@ public sealed class LdapQueryExecutor
         foreach (var ch in text)
             b.Append(ch switch
             {
-                '*' => @"\2a", '(' => @"\28", ')' => @"\29", '\\' => @"\5c", '\0' => @"\00",
+                '*' => @"\2a",
+                '(' => @"\28",
+                ')' => @"\29",
+                '\\' => @"\5c",
+                '\0' => @"\00",
                 _ => ch.ToString()
             });
         return b.ToString();
