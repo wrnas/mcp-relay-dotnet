@@ -4,8 +4,8 @@ using Microsoft.AspNetCore.Mvc;
 namespace RelayMcp.Controllers;
 
 /// <summary>
-/// A minimal browser approval UI. It uses an independently authenticated browser session,
-/// never the AI-facing API key. Remote access requires real HTTPS on this endpoint.
+/// 极简网页审批：使用独立的 ApprovalKey、浏览器会话和 CSRF 令牌，不使用 AI 接口的 ApiKey。
+/// 默认远程访问要求 HTTPS；经管理员显式启用配置后可在受控私有网段使用 HTTP。
 /// </summary>
 [Route("approve")]
 public sealed class ApprovalPageController : Controller
@@ -21,8 +21,11 @@ public sealed class ApprovalPageController : Controller
         _configuration = configuration;
     }
 
+    // 和 Program.cs 的审批中间件使用同一套传输校验规则，避免出现中间件放行但页面返回 404。
+    // 注意：AllowInsecureLanApproval 默认 false，只有显式配置为 true 才允许内网 HTTP 审批。
     private bool Available => string.Equals(_configuration["Relay:ApprovalMode"], "web", StringComparison.OrdinalIgnoreCase)
-        && (Request.IsHttps || (HttpContext.Connection.RemoteIpAddress is IPAddress ip && IPAddress.IsLoopback(ip)));
+        && Program.IsApprovalTransportAllowed(
+            HttpContext, _configuration.GetValue<bool>("Relay:AllowInsecureLanApproval"));
 
     private static string H(string? value) => WebUtility.HtmlEncode(value ?? "");
     private static bool ValidId(string id) => id.Length == 32 && id.All(Uri.IsHexDigit);

@@ -8,12 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_ldap_skill_configuration():
     skills = json.loads((ROOT / "skills" / "ad_ldap.json").read_text(encoding="utf-8"))
     settings = json.loads((ROOT / "AD-config.example.json").read_text(encoding="utf-8"))["ActiveDirectory"]
-    allowed = set(settings["Servers"]["CORP_AD"]["AllowedAttributes"])
+    assert "AllowedAttributes" not in settings["Servers"]["CORP_AD"]
+    assert isinstance(settings["Servers"]["CORP_AD"]["DeniedAttributes"], list)
     assert set(skills) == {"ad_ldap_get_user", "ad_ldap_search_users", "ad_ldap_get_user_groups", "ad_ldap_get_group_members", "ad_ldap_check_user_status"}
     for item in skills.values():
         assert item["risk"] == "read"
         assert item["ldap_server"] == "CORP_AD"
-        assert set(item["ldap_attributes"]).issubset(allowed)
+        assert item["ldap_attributes"]
         assert "ldap_filter" in item and item["ldap_filter"].startswith("(")
     assert settings["Servers"]["CORP_AD"]["UseSsl"] is True
     assert settings["Enabled"] is False
@@ -27,6 +28,10 @@ def test_executor_has_restricted_operations():
     assert "DeleteRequest" not in source
     assert "SecureSocketLayer = true" in source
     assert "VerifyServerCertificate =" not in source
+    assert "BuiltInDeniedAttributes" in source
+    assert 'GetSection("DeniedAttributes")' in source
+    assert "没有读取到密码环境变量" in source
+    assert 'GetSection("AllowedAttributes")' not in source
 
 
 def test_registration_is_wired():

@@ -1387,7 +1387,7 @@ Mcp-Relay.Net 可通过 **LDAPS** 使用非域计算机上的独立查询账号�
 1. 将 `LdapQueryExecutor.cs` 和其他补丁文件放入对应目录，项目 NuGet 依赖 `System.DirectoryServices.Protocols` 8.0.0。
 2. 在域控制器上准备可用的 LDAPS（TCP 636）与受信任的服务器证书，确保网关能够解析证书上的主机名，并信任签发 CA。**不要关闭证书校验**。
 3. 创建只具有必要目录读取权限的服务账号。非域场景示例使用 LDAPS + LDAP Simple Bind，账号建议填写 UPN（例如 `svc_relay@example.local`），不是域控管理员账号。
-4. 把补丁里的 `AD-config.example.json` 中 `ActiveDirectory` 节点合并进你现有的 `appsettings.json`（**不要覆盖原来的 appsettings.json**），修改 Host、BaseDn、Username、AllowedAttributes。
+4. 把补丁里的 `AD-config.example.json` 中 `ActiveDirectory` 节点合并进你现有的 `appsettings.json`（**不要覆盖原来的 appsettings.json**），修改 Host、BaseDn、Username。可按需要通过 DeniedAttributes 追加禁止读取的自定义属性。
 5. 在运行 .NET 进程的环境中设置 `MCP_AD_PASSWORD` 密码变量，重启进程让新环境变量生效；切勿把密码写进 Skill 文件或提交到 Git。
 6. 把 `skills/ad_ldap.json` 复制进 `skills/` 目录；启用 `ActiveDirectory:Enabled=true`，启动服务并在 Swagger 中调用 `/skills/execute`。
 
@@ -1408,7 +1408,7 @@ Mcp-Relay.Net 可通过 **LDAPS** 使用非域计算机上的独立查询账号�
         "BaseDn": "DC=example,DC=local",
         "TimeoutSeconds": 15,
         "MaxResults": 100,
-        "AllowedAttributes": ["cn", "sAMAccountName", "displayName", "mail", "department", "title", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "pwdLastSet", "lockoutTime", "memberOf", "member"]
+        "DeniedAttributes": []
       }
     }
   }
@@ -1426,7 +1426,7 @@ Visual Studio 直接 F5 启动时，不会自动读取另一个 PowerShell 窗�
 
 ### Skill 配置与调用
 
-LDAP Skill 使用 `ldap_server`、`ldap_filter`、`ldap_attributes`、可选 `ldap_scope`（`base`、`one`、`sub`）、可选 `ldap_base_dn`。查询过滤器中的 `{username}` 等占位符会被网关按 LDAP 过滤器语法转义，而不是直接拼接输入。`ldap_base_dn` 必须处于该服务器配置的 `BaseDn` 范围内；属性必须位于 `AllowedAttributes` 白名单。
+LDAP Skill 使用 `ldap_server`、`ldap_filter`、`ldap_attributes`、可选 `ldap_scope`（`base`、`one`、`sub`）、可选 `ldap_base_dn`。查询过滤器中的 `{username}` 等占位符会被网关按 LDAP 过滤器语法转义，而不是直接拼接输入。`ldap_base_dn` 必须处于该服务器配置的 `BaseDn` 范围内；每个 Skill 通过 `ldap_attributes` 显式声明要查询的属性；执行器默认拒绝密码、LAPS、BitLocker 恢复密钥等敏感字段，并可通过服务器的 `DeniedAttributes` 添加额外禁止属性。旧的 `AllowedAttributes` 不再使用。
 
 ```json
 {
@@ -1446,9 +1446,19 @@ LDAP Skill 使用 `ldap_server`、`ldap_filter`、`ldap_attributes`、可选 `ld
 - 查询使用分页并限制最大返回对象数，`limit_reached=true` 只表示达到了本次上限，**不表示取得了全部对象**。
 - 当前为仅查询执行器，没有通用 LDAP 自由搜索入口、任意 LDAP 写入或凭据输出。
 
+
+### AD 属性访问策略
+
+- 默认不要求维护全局 `AllowedAttributes`；可从 `appsettings.json` 删除原有的 `AllowedAttributes` 节点。
+- 每个 LDAP Skill 必须在 `ldap_attributes` 中列出查询字段，不支持 `*` 或任意 LDAP 查询请求。
+- 代码内置了不可关闭的敏感属性黑名单，包括密码属性、LAPS 密码、BitLocker 恢复密钥和安全描述符等。
+- 如果你们的 AD 扩展了敏感字段，可在对应服务器的 `DeniedAttributes` 中追加名称，例如 `"DeniedAttributes": ["myInternalSecret"]`。
+- 该机制不能代替目录最小权限：请使用独立的只读查询账号，并只把检查过的 Skill 暴露给 AI。
+- `LDAP_CONFIG` 配置错误会指出具体缺失项；`LDAP_DENIED_ATTRIBUTE` 表示 Skill 请求了被禁止的属性。
+
 ### 常见连接问题
 
-- `LDAP_CONFIG`：确认 `ActiveDirectory:Enabled`、服务器配置、环境变量密码、Skill 属性白名单。
+- `LDAP_CONFIG`：确认 `ActiveDirectory:Enabled`、服务器别名、Host、BaseDn、Username、PasswordEnv 对应的进程环境变量。新版会指出具体缺少的配置项。
 - `LDAP_ERROR`：依次检查域控 DNS、TCP 636、证书信任链、账号 UPN/密码、账号查询权限。
 - `NOT_FOUND` 或空 `entries`：先核对查询账号、BaseDn 和筛选器，再确认目录中是否存在对应对象。
 

@@ -105,14 +105,24 @@ namespace RelayMcp
         [JsonPropertyName("header_name")]
         public string? HeaderName { get; set; }
 
-        // local 为本机 PowerShell (需安装相应命令模块)，exchange 为远程 Exchange。
-        [JsonPropertyName("powershell_target")]
+        // LDAP Skill 的 JSON 字段使用 snake_case，需要显式映射。
+        [JsonPropertyName("ldap_server")]
         public string? LdapServer { get; set; }
+
+        [JsonPropertyName("ldap_filter")]
         public string? LdapFilter { get; set; }
+
+        [JsonPropertyName("ldap_attributes")]
         public List<string>? LdapAttributes { get; set; }
+
+        [JsonPropertyName("ldap_scope")]
         public string? LdapScope { get; set; }
+
+        [JsonPropertyName("ldap_base_dn")]
         public string? LdapBaseDn { get; set; }
 
+        // local 为本机 PowerShell，exchange 为远程 Exchange。
+        [JsonPropertyName("powershell_target")]
         public string? PowerShellTarget { get; set; }
 
         // 用于接收 JSON 中的 PowerShell 脚本

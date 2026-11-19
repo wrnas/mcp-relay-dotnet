@@ -14,6 +14,19 @@ public sealed class LdapQueryExecutor
 {
     private static readonly Regex ParamRef = new(@"\{([A-Za-z_][A-Za-z0-9_]*)\}", RegexOptions.Compiled);
     private static readonly Regex AttributeName = new(@"^[a-zA-Z][a-zA-Z0-9-]*$", RegexOptions.Compiled);
+    // 安全兜底：这些属性包含账号凭据、LAPS 密码、BitLocker 恢复密钥等。
+    // 无论 appsettings.json 怎样配置，都不能通过此只读 LDAP 执行器返回。
+    // 其他企业自定义敏感属性，可通过 ActiveDirectory:Servers:<别名>:DeniedAttributes 追加。
+    private static readonly HashSet<string> BuiltInDeniedAttributes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "unicodePwd", "userPassword", "dBCSPwd", "lmPwdHistory", "ntPwdHistory",
+        "supplementalCredentials", "pekList",
+        "msDS-ManagedPassword", "ms-Mcs-AdmPwd",
+        "msLAPS-Password", "msLAPS-EncryptedPassword", "msLAPS-EncryptedPasswordHistory",
+        "msLAPS-EncryptedDSRMPassword", "msLAPS-EncryptedDSRMPasswordHistory",
+        "msFVE-RecoveryPassword", "msFVE-KeyPackage", "nTSecurityDescriptor"
+    };
+
     private readonly IConfiguration _settings;
     private readonly ILogger<LdapQueryExecutor> _logger;
 
@@ -48,26 +61,70 @@ public sealed class LdapQueryExecutor
         if (!_settings.GetValue("ActiveDirectory:Enabled", false))
             return ExecResult.Fail("LDAP_DISABLED", "ActiveDirectory:Enabled 尚未启用", 403);
 
-        var section = _settings.GetSection($"ActiveDirectory:Servers:{skill.LdapServer}");
+        // Skill 只提供服务器别名，禁止 AI 随意指定域控地址。
+        var alias = skill.LdapServer;
+        var section = _settings.GetSection($"ActiveDirectory:Servers:{alias}");
+        if (string.IsNullOrWhiteSpace(alias) || !section.Exists())
+            return ExecResult.Fail("LDAP_CONFIG", $"未找到 AD 服务器配置 ActiveDirectory:Servers:{alias}", 500);
+
         var host = section["Host"];
         var baseDn = section["BaseDn"];
         var user = section["Username"];
         var passwordEnv = section["PasswordEnv"];
-        var password = string.IsNullOrWhiteSpace(passwordEnv) ? null : Environment.GetEnvironmentVariable(passwordEnv);
-        var allowed = section.GetSection("AllowedAttributes").Get<string[]>() ?? Array.Empty<string>();
-        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(baseDn) ||
-            string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password) || allowed.Length == 0)
-            return ExecResult.Fail("LDAP_CONFIG", "AD 服务器地址、搜索范围、查询账号、密码环境变量或属性白名单未配置", 500);
+        var configuredPassword = section["Password"];
+
+        // 个人助手提供两种密码配置方式，减少首次接入的配置门槛：
+        // 1. Password：直接从本机配置文件读取（适合单机测试、私有部署）。
+        // 2. PasswordEnv：从运行进程的环境变量读取（适合长期部署）。
+        // 如果两项都配置，优先使用 PasswordEnv；变量不存在时明确报错，不悄悄回退到旧密码。
+        // 注意：不要将真实密码写入日志、API 返回值或公开 Git 仓库。
+        if (string.IsNullOrWhiteSpace(host))
+            return ExecResult.Fail("LDAP_CONFIG", $"ActiveDirectory:Servers:{alias}:Host 未配置", 500);
+        if (string.IsNullOrWhiteSpace(baseDn))
+            return ExecResult.Fail("LDAP_CONFIG", $"ActiveDirectory:Servers:{alias}:BaseDn 未配置", 500);
+        if (string.IsNullOrWhiteSpace(user))
+            return ExecResult.Fail("LDAP_CONFIG", $"ActiveDirectory:Servers:{alias}:Username 未配置", 500);
+        string? password;
+        if (!string.IsNullOrWhiteSpace(passwordEnv))
+        {
+            // 环境变量必须存在于 RelayMcp.exe 进程中；其他终端设置不会自动生效。
+            password = Environment.GetEnvironmentVariable(passwordEnv);
+            if (string.IsNullOrEmpty(password))
+                return ExecResult.Fail("LDAP_CONFIG",
+                    $"没有读取到密码环境变量 {passwordEnv}；请检查进程环境，或删除 PasswordEnv 并改用 Password 直接配置", 500);
+        }
+        else
+        {
+            password = configuredPassword;
+            if (string.IsNullOrEmpty(password))
+                return ExecResult.Fail("LDAP_CONFIG",
+                    $"ActiveDirectory:Servers:{alias} 未配置 LDAP 密码：请填写 Password 或 PasswordEnv", 500);
+        }
+
+        // 非域环境当前只允许 LDAPS + Basic（Simple Bind），禁止密码通过明文 LDAP 传输。
         if (!section.GetValue("UseSsl", true) || section.GetValue("Port", 636) <= 0 ||
             !string.Equals(section["AuthType"], "Basic", StringComparison.OrdinalIgnoreCase))
             return ExecResult.Fail("LDAP_CONFIG", "当前非域 LDAP 连接仅支持 LDAPS + Basic Bind（UPN/DN 账号）", 500);
 
+        // 不再强制要求维护 AllowedAttributes。每个 Skill 的 ldap_attributes 仍明确列出
+        // 本次需要读取的字段；内置敏感属性黑名单始终生效，用户可通过 DeniedAttributes 追加。
+        // 旧的 AllowedAttributes 配置可以安全删除，不会影响其他 Skill。
+        var denied = new HashSet<string>(BuiltInDeniedAttributes, StringComparer.OrdinalIgnoreCase);
+        var configuredDenied = section.GetSection("DeniedAttributes").Get<string[]>() ?? Array.Empty<string>();
+        foreach (var attribute in configuredDenied)
+        {
+            if (string.IsNullOrWhiteSpace(attribute) || !AttributeName.IsMatch(attribute))
+                return ExecResult.Fail("LDAP_CONFIG", $"ActiveDirectory:Servers:{alias}:DeniedAttributes 存在无效属性名", 500);
+            denied.Add(attribute);
+        }
+        var blocked = skill.LdapAttributes?.Where(denied.Contains).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            ?? Array.Empty<string>();
+        if (blocked.Length > 0)
+            return ExecResult.Fail("LDAP_DENIED_ATTRIBUTE", $"LDAP Skill 包含禁止读取的 AD 属性：{string.Join(", ", blocked)}", 403);
+
         var queryDn = skill.LdapBaseDn ?? baseDn;
         if (!DnWithinBase(queryDn, baseDn))
             return ExecResult.Fail("LDAP_CONFIG", "Skill 的 ldap_base_dn 超出服务器允许的 BaseDn", 403);
-        var allow = allowed.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (skill.LdapAttributes is null || skill.LdapAttributes.Any(a => !allow.Contains(a)))
-            return ExecResult.Fail("LDAP_CONFIG", "Skill 请求了未在 AllowedAttributes 中授权的属性", 403);
         var filter = ParamRef.Replace(skill.LdapFilter!, m =>
         {
             var p = m.Groups[1].Value;
@@ -87,7 +144,8 @@ public sealed class LdapQueryExecutor
         {
             // System.DirectoryServices.Protocols executes synchronously. Keep it off the request thread.
             var result = await Task.Run(() => Search(host, section.GetValue("Port", 636), user,
-                password, queryDn, filter, scope, skill.LdapAttributes!, limit, seconds));
+                password, queryDn, filter, scope, skill.LdapAttributes!, limit, seconds,
+                !denied.Contains("distinguishedName")));
             return ExecResult.Success(new
             {
                 server = skill.LdapServer,
@@ -101,8 +159,17 @@ public sealed class LdapQueryExecutor
         }
         catch (LdapException ex)
         {
-            _logger.LogWarning("LDAP search failed on {Server}: {Code}", skill.LdapServer, ex.ErrorCode);
-            return ExecResult.Fail("LDAP_ERROR", $"AD 查询失败（LDAP code {ex.ErrorCode}），请检查认证、TLS、权限和筛选条件", 502);
+            // 先记录实际失败阶段和原始异常，方便从服务器日志定位 TLS/认证问题。
+            // 错误信息只展示目标别名、阶段、LDAP 错误码，不回显用户名或密码。
+            var phase = ex.Data["LDAP_PHASE"]?.ToString() ?? "LDAP查询";
+            _logger.LogWarning(ex, "AD LDAP 请求失败；服务器别名 {Server}，阶段 {Phase}，错误码 {Code}",
+                skill.LdapServer, phase, ex.ErrorCode);
+            if (ex.ErrorCode == 81)
+                return ExecResult.Fail("LDAP_CONNECT",
+                    $"AD {phase}失败（LDAP 81 / LDAP_SERVER_DOWN）。端口通不代表 TLS 握手成功；请在网关机器上用 LDP 勾选 SSL 测试域控 FQDN:636，并检查证书名称、证书信任链及 TLS。", 502);
+            if (ex.ErrorCode == 49)
+                return ExecResult.Fail("LDAP_AUTH", "AD 身份认证失败（LDAP 49）；请核对账号格式、密码及账号状态", 502);
+            return ExecResult.Fail("LDAP_ERROR", $"AD {phase}失败（LDAP {ex.ErrorCode}）；请查看网关日志以获取具体错误", 502);
         }
         catch (Exception ex)
         {
@@ -112,7 +179,8 @@ public sealed class LdapQueryExecutor
     }
 
     private static List<Dictionary<string, object?>> Search(string host, int port, string username, string password,
-        string dn, string filter, SearchScope scope, List<string> attrs, int limit, int seconds)
+        string dn, string filter, SearchScope scope, List<string> attrs, int limit, int seconds,
+        bool includeDistinguishedName)
     {
         using var connection = new LdapConnection(new LdapDirectoryIdentifier(host, port));
         connection.AuthType = AuthType.Basic;
@@ -123,7 +191,16 @@ public sealed class LdapQueryExecutor
         // Do NOT use VerifyServerCertificate override: the server certificate must chain
         // to a trusted CA and match the configured Host.
         connection.Timeout = TimeSpan.FromSeconds(seconds);
-        connection.Bind();
+        try
+        {
+            // Bind 既包含建立 LDAPS/TLS 会话，也包含账号认证。
+            connection.Bind();
+        }
+        catch (LdapException ex)
+        {
+            ex.Data["LDAP_PHASE"] = "连接/认证";
+            throw;
+        }
 
         var req = new SearchRequest(dn, filter, scope, attrs.ToArray())
         {
@@ -135,13 +212,21 @@ public sealed class LdapQueryExecutor
         {
             req.Controls.Clear();
             req.Controls.Add(new PageResultRequestControl(Math.Min(100, limit - result.Count)) { Cookie = cookie });
-            var response = (SearchResponse)connection.SendRequest(req);
+            SearchResponse response;
+            try
+            {
+                response = (SearchResponse)connection.SendRequest(req);
+            }
+            catch (LdapException ex)
+            {
+                ex.Data["LDAP_PHASE"] = "搜索";
+                throw;
+            }
             foreach (SearchResultEntry entry in response.Entries)
             {
-                var item = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["distinguishedName"] = entry.DistinguishedName
-                };
+                var item = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                if (includeDistinguishedName)
+                    item["distinguishedName"] = entry.DistinguishedName;
                 foreach (DirectoryAttribute attribute in entry.Attributes.Values)
                 {
                     var values = attribute.GetValues(typeof(string)).Cast<string>().ToArray();
