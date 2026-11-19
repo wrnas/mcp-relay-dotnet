@@ -6,6 +6,13 @@
 **项目定位：** 个人运维助手，优先解决传统企业多业务系统的日常运维需求。  
 **文档适用版本：** 2026-11-18 三模式审批增量补丁（基于前一版 Swagger 修复工程）。
 
+<p align="center">
+  <img src="https://img.shields.io/badge/.NET-8.0-purple" alt=".NET 8">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/runtime-Windows--first-blue" alt="Windows-first runtime">
+  <img src="https://img.shields.io/badge/API-REST%20%2F%20OpenAPI-blueviolet" alt="REST / OpenAPI">
+</p>
+
 > 本项目目前仍是个人使用阶段的原型，并非已经完成生产安全验证的企业级产品。本文按当前源码描述功能；有些能力仍在规划中，不应视为已实现。
 
 ## 目录
