@@ -5,7 +5,9 @@
       "username": "string 用户的登录名 (SamAccountName)，例如 'zhangsan'"
     },
     "protocol": "powershell",
-    "script": "$user = Get-ADUser -Identity '{username}' -Properties DisplayName, Enabled -ErrorAction SilentlyContinue; if ($user) { [PSCustomObject]@{ Exists = $true; Name = $user.Name; DisplayName = $user.DisplayName; Enabled = $user.Enabled; DN = $user.DistinguishedName } } else { [PSCustomObject]@{ Exists = $false; Message = '用户不存在' } }"
+    "script": "$user = Get-ADUser -Identity $username -Properties DisplayName, Enabled -ErrorAction SilentlyContinue; if ($user) { [PSCustomObject]@{ Exists = $true; Name = $user.Name; DisplayName = $user.DisplayName; Enabled = $user.Enabled; DN = $user.DistinguishedName } } else { [PSCustomObject]@{ Exists = $false; Message = '用户不存在' } }",
+    "powershell_target": "local",
+    "risk": "read"
   },
   "ad_search_users": {
     "desc": "根据姓名或登录名模糊搜索 AD 用户，返回匹配的用户列表",
@@ -13,7 +15,9 @@
       "keyword": "string 搜索关键字（如：'张' 或 'zhang'）"
     },
     "protocol": "powershell",
-    "script": "Get-ADUser -Filter \"Name -like '*{keyword}*' -or SamAccountName -like '*{keyword}*'\" -Properties DisplayName, Enabled, EmailAddress | Select-Object Name, SamAccountName, DisplayName, EmailAddress, Enabled"
+    "script": "$pattern = '*' + ($keyword -replace '[*?\\[\\]]', '') + '*'; Get-ADUser -Filter { Name -like $pattern -or SamAccountName -like $pattern } -Properties DisplayName, Enabled, EmailAddress | Select-Object Name, SamAccountName, DisplayName, EmailAddress, Enabled",
+    "powershell_target": "local",
+    "risk": "read"
   },
   "ad_check_group_exist": {
     "desc": "检查 AD 域中是否存在指定的组，并返回组信息",
@@ -21,7 +25,9 @@
       "groupname": "string 组名 (Name) 或 登录名 (SamAccountName)"
     },
     "protocol": "powershell",
-    "script": "$group = Get-ADGroup -Identity '{groupname}' -Properties Description, GroupCategory, GroupScope -ErrorAction SilentlyContinue; if ($group) { [PSCustomObject]@{ Exists = $true; Name = $group.Name; Description = $group.Description; Category = $group.GroupCategory; Scope = $group.GroupScope } } else { [PSCustomObject]@{ Exists = $false; Message = '组不存在' } }"
+    "script": "$group = Get-ADGroup -Identity $groupname -Properties Description, GroupCategory, GroupScope -ErrorAction SilentlyContinue; if ($group) { [PSCustomObject]@{ Exists = $true; Name = $group.Name; Description = $group.Description; Category = $group.GroupCategory; Scope = $group.GroupScope } } else { [PSCustomObject]@{ Exists = $false; Message = '组不存在' } }",
+    "powershell_target": "local",
+    "risk": "read"
   },
   "ad_check_user_in_group": {
     "desc": "检查指定用户是否在某个特定的 AD 组中",
@@ -30,7 +36,9 @@
       "groupname": "string 组名"
     },
     "protocol": "powershell",
-    "script": "$member = Get-ADGroupMember -Identity '{groupname}' -ErrorAction SilentlyContinue | Where-Object { $_.SamAccountName -eq '{username}' }; if ($member) { [PSCustomObject]@{ IsMember = $true; Username = '{username}'; Group = '{groupname}'; Message = '用户在组中' } } else { [PSCustomObject]@{ IsMember = $false; Username = '{username}'; Group = '{groupname}'; Message = '用户不在组中或用户/组不存在' } }"
+    "script": "$member = Get-ADGroupMember -Identity $groupname -ErrorAction SilentlyContinue | Where-Object { $_.SamAccountName -eq $username }; if ($member) { [PSCustomObject]@{ IsMember = $true; Username = $username; Group = $groupname; Message = '用户在组中' } } else { [PSCustomObject]@{ IsMember = $false; Username = $username; Group = $groupname; Message = '用户不在组中或用户/组不存在' } }",
+    "powershell_target": "local",
+    "risk": "read"
   },
   "ad_get_user_groups": {
     "desc": "查询指定用户所属的所有 AD 组",
@@ -38,6 +46,8 @@
       "username": "string 用户的登录名 (SamAccountName)"
     },
     "protocol": "powershell",
-    "script": "$groups = Get-ADUser -Identity '{username}' -Properties MemberOf -ErrorAction SilentlyContinue | Select-Object -ExpandProperty MemberOf; if ($groups) { $groups | ForEach-Object { [PSCustomObject]@{ GroupDN = $_ } } } else { [PSCustomObject]@{ Message = '用户不存在或未加入任何组' } }"
+    "script": "$groups = Get-ADUser -Identity $username -Properties MemberOf -ErrorAction SilentlyContinue | Select-Object -ExpandProperty MemberOf; if ($groups) { $groups | ForEach-Object { [PSCustomObject]@{ GroupDN = $_ } } } else { [PSCustomObject]@{ Message = '用户不存在或未加入任何组' } }",
+    "powershell_target": "local",
+    "risk": "read"
   }
 }

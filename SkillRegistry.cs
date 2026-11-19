@@ -1,533 +1,611 @@
-﻿using System.Security;
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using System.Collections;
 using System.Data.Common;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
+using System.Security;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
-namespace RelayMcp
+namespace RelayMcp;
+
+public sealed class SkillRegistry : IDisposable
 {
-    public class SkillRegistry
+    private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+    private static readonly Regex ParameterName = new(@"^[a-zA-Z_][a-zA-Z0-9_]*$", RegexOptions.Compiled);
+    private static readonly Regex LegacyPsPlaceholder = new(@"\{[a-zA-Z_][a-zA-Z0-9_]*\}", RegexOptions.Compiled);
+
+    private readonly IConfiguration _config;
+    private readonly ApprovalQueue _approvals;
+    private readonly ILogger<SkillRegistry> _logger;
+    private readonly string _skillsDir;
+    private readonly object _reloadGate = new();
+    private Dictionary<string, Dictionary<string, SkillDefinition>> _byFile = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
+    private FileSystemWatcher? _watcher;
+
+    public SkillRegistry(IWebHostEnvironment env, IConfiguration config, ApprovalQueue approvals, ILogger<SkillRegistry> logger)
     {
-        // 👈 去掉了 readonly，为了在热加载时能安全替换（写时复制机制）
-        private Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
-        private static readonly JsonSerializerOptions JsonOpts = new()
+        _config = config;
+        _approvals = approvals;
+        _logger = logger;
+        _skillsDir = Path.Combine(env.ContentRootPath, "skills");
+        if (!Directory.Exists(_skillsDir))
+            _skillsDir = Path.Combine(AppContext.BaseDirectory, "skills");
+        Directory.CreateDirectory(_skillsDir);
+
+        LoadAllSkills();
+        try
         {
-            PropertyNameCaseInsensitive = true
-        };
-
-        private readonly IConfiguration _config;
-        private readonly string _skillsDir;
-        private readonly object _lockObj = new object(); // 用于防止并发读写冲突
-
-        public SkillRegistry(IWebHostEnvironment env, IConfiguration config)
+            _watcher = new FileSystemWatcher(_skillsDir, "*.json")
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+                EnableRaisingEvents = false
+            };
+            _watcher.Changed += OnFileChanged;
+            _watcher.Created += OnFileChanged;
+            _watcher.Deleted += OnFileChanged;
+            _watcher.Renamed += OnFileChanged;
+            _watcher.EnableRaisingEvents = true;
+        }
+        catch (Exception ex)
         {
-            _config = config;
+            _logger.LogWarning(ex, "Skill hot reload watcher unavailable");
+        }
+    }
 
-            // 确定 skills 目录
-            _skillsDir = Path.Combine(env.ContentRootPath, "skills");
-            if (!Directory.Exists(_skillsDir))
-            {
-                _skillsDir = Path.Combine(AppContext.BaseDirectory, "skills");
-            }
+    private void OnFileChanged(object sender, FileSystemEventArgs e)
+    {
+        // Events can occur while an editor has written only half the JSON file.
+        Thread.Sleep(250);
+        LoadAllSkills();
+    }
 
-            if (!Directory.Exists(_skillsDir))
-            {
-                Console.WriteLine($"警告: 找不到 skills 目录 {_skillsDir}");
-                return;
-            }
-
-            // 1. 启动时首次加载所有 JSON
-            LoadAllSkills();
-
-            // 2. 👇 开启文件监听（热加载核心）
+    private void LoadAllSkills()
+    {
+        lock (_reloadGate)
+        {
             try
             {
-                var watcher = new FileSystemWatcher(_skillsDir, "*.json");
-                // 监听最后修改时间、文件名和目录名
-                watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName;
-
-                // 绑定事件
-                watcher.Changed += OnFileChanged;
-                watcher.Created += OnFileChanged;
-                watcher.Deleted += OnFileChanged;
-                watcher.Renamed += OnFileChanged;
-
-                watcher.EnableRaisingEvents = true;
-                Console.WriteLine($"👀 已开启技能热加载监听: {_skillsDir}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"启动文件监听失败: {ex.Message}");
-            }
-        }
-
-        // 👇 文件变化时的回调
-        private void OnFileChanged(object sender, FileSystemEventArgs e)
-        {
-            // 防抖处理：操作系统保存文件时经常会触发多次事件
-            // 稍微等待 200 毫秒，等文件写入完成
-            Thread.Sleep(200);
-
-            Console.WriteLine($"\n🔄 检测到配置文件变化 [{e.ChangeType}]：{e.Name}，正在重新加载...");
-            LoadAllSkills();
-        }
-
-        // 👇 抽离出的独立加载逻辑
-        private void LoadAllSkills()
-        {
-            // 创建一个新的字典
-            var newSkills = new Dictionary<string, SkillDefinition>(StringComparer.OrdinalIgnoreCase);
-
-            try
-            {
-                foreach (var file in Directory.GetFiles(_skillsDir, "*.json"))
+                var updatedFiles = new Dictionary<string, Dictionary<string, SkillDefinition>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var file in Directory.GetFiles(_skillsDir, "*.json").OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
                 {
                     try
                     {
-                        // 读取时加上共享锁，防止文件被占用
                         using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                         using var sr = new StreamReader(fs);
-                        var json = sr.ReadToEnd();
-
-                        var dict = JsonSerializer.Deserialize<Dictionary<string, SimpleSkill>>(json, JsonOpts);
-                        if (dict is null) continue;
-
-                        var fileDomain = Path.GetFileNameWithoutExtension(file);
-                        foreach (var kvp in dict)
+                        var document = JsonSerializer.Deserialize<Dictionary<string, SimpleSkill>>(sr.ReadToEnd(), JsonOpts)
+                            ?? throw new FormatException("JSON 根节点必须是 Skill 对象");
+                        var definitions = new Dictionary<string, SkillDefinition>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var (name, skill) in document)
                         {
-                            newSkills[kvp.Key] = ToDefinition(kvp.Key, kvp.Value, fileDomain);
+                            if (string.IsNullOrWhiteSpace(name) || skill is null)
+                                throw new FormatException("Skill 名称或内容不能为空");
+                            definitions.Add(name, ToDefinition(name, skill, Path.GetFileNameWithoutExtension(file)));
                         }
+                        updatedFiles[file] = definitions;
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"读取文件 {file} 失败: {ex.Message}");
+                        _logger.LogWarning("Skill file invalid, retaining last good configuration: {File} ({Error})",
+                            Path.GetFileName(file), ex.Message);
+                        if (_byFile.TryGetValue(file, out var previous)) updatedFiles[file] = previous;
                     }
                 }
 
-                // 👈 核心：原子替换。在锁的保护下，把新字典替换给老字典
-                lock (_lockObj)
+                var merged = new Dictionary<string, SkillDefinition>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (file, definitions) in updatedFiles)
                 {
-                    _skills = newSkills;
+                    foreach (var (name, definition) in definitions)
+                    {
+                        if (!merged.TryAdd(name, definition))
+                            _logger.LogWarning("Duplicate Skill {Skill} in {File}; first definition retained", name, Path.GetFileName(file));
+                    }
                 }
-
-                Console.WriteLine($"✅ 技能加载/重载完成，当前共有 {newSkills.Count} 个技能。");
+                _byFile = updatedFiles;
+                _skills = merged;
+                _logger.LogInformation("Loaded {Count} Skills", _skills.Count);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"加载目录失败: {ex.Message}");
+                _logger.LogError(ex, "Skill directory reload failed; retained last known configuration");
             }
         }
+    }
 
-        private SkillDefinition ToDefinition(string name, SimpleSkill s, string fileDomain)
+    private SkillDefinition ToDefinition(string name, SimpleSkill simple, string domain)
+    {
+        if (simple.Params != null && simple.Params.Keys.Any(k => !ParameterName.IsMatch(k)))
+            throw new FormatException($"{name}: 参数名只能使用英文字母、数字、下划线，且不能以数字开头");
+        var backend = BuildBackend(simple);
+        if (backend is null) throw new FormatException($"{name}: 缺少执行方式");
+
+        if (!string.IsNullOrWhiteSpace(simple.Auth))
         {
-            var backend = BuildBackend(s);
-            if (backend != null && !string.IsNullOrEmpty(s.Auth) && !string.IsNullOrEmpty(s.TokenKey))
-            {
-                backend.AuthType = s.Auth;
-                backend.TokenKey = s.TokenKey;
-                backend.Token = _config[$"Tokens:{s.TokenKey}"];
-            }
-
-            return new()
-            {
-                ToolName = name,
-                Description = s.Desc,
-                Domain = s.Domain ?? fileDomain,
-                InputSchema = BuildSchema(s.Params),
-                Backend = backend,               
-                Enabled = s.Enabled
-            };
+            if (!new[] { "bearer", "basic", "header" }.Contains(simple.Auth.ToLowerInvariant()))
+                throw new FormatException($"{name}: 不支持的 auth 类型");
+            if (string.IsNullOrWhiteSpace(simple.TokenKey))
+                throw new FormatException($"{name}: auth 必须配置 token_key");
+            backend.AuthType = simple.Auth;
+            backend.TokenKey = simple.TokenKey;
+            backend.Token = _config[$"Tokens:{simple.TokenKey}"];
+            backend.HeaderName = simple.HeaderName;
+            if (string.IsNullOrWhiteSpace(backend.Token))
+                throw new FormatException($"{name}: 未设置 Tokens:{simple.TokenKey}");
         }
 
-        private static JsonElement BuildSchema(Dictionary<string, string>? paramsDict)
+        if (simple.Risk is not null && simple.Risk != "read" && simple.Risk != "write")
+            throw new FormatException($"{name}: risk 仅支持 read/write");
+
+        var defaultWrite = backend.Protocol switch
         {
-            var props = new JsonObject();
-            var required = new JsonArray();
-
-            if (paramsDict is not null)
-            {
-                foreach (var (key, rawValue) in paramsDict)
-                {
-                    var raw = rawValue?.Trim() ?? "";
-                    var optional = raw.StartsWith("?");
-                    if (optional) raw = raw[1..].Trim();
-
-                    var space = raw.IndexOf(' ');
-                    var type = NormalizeType(space < 0 ? raw : raw[..space]);
-                    var desc = space < 0 ? "" : raw[(space + 1)..];
-
-                    props[key] = new JsonObject { ["type"] = type, ["description"] = desc };
-                    if (!optional) required.Add(key);
-                }
-            }
-
-            var root = new JsonObject
-            {
-                ["type"] = "object",
-                ["properties"] = props,
-                ["required"] = required
-            };
-            return JsonSerializer.SerializeToElement(root);
-        }
-
-        private static string NormalizeType(string t) => t.ToLowerInvariant() switch
-        {
-            "int" or "integer" => "integer",
-            "num" or "number" or "float" or "double" => "number",
-            "bool" or "boolean" => "boolean",
-            "arr" or "array" => "array",
-            "obj" or "object" => "object",
-            _ => "string"
+            "rest" => backend.Method != "GET",
+            "soap" or "powershell" => true,
+            "sql" => !SqlSafety.IsReadOnly(backend.SqlTemplate, out _),
+            _ => true
         };
+        // Dynamic SQL cannot be changed into a read operation just by claiming risk=read.
+        var sqlIsWrite = backend.Protocol == "sql" && !SqlSafety.IsReadOnly(backend.SqlTemplate, out _);
+        var isWrite = sqlIsWrite || simple.Risk == "write" || (simple.Risk is null && defaultWrite);
 
-        private static BackendConfig? BuildBackend(SimpleSkill s)
+        if (backend.Protocol == "powershell" && LegacyPsPlaceholder.IsMatch(backend.ScriptTemplate ?? ""))
+            throw new FormatException($"{name}: PowerShell 不再支持 {{参数}} 字符串替换，请使用 $参数 变量");
+
+        return new SkillDefinition
         {
-            if (s.Get is not null) return new() { Protocol = "rest", Method = "GET", Url = s.Get };
-            if (s.Post is not null) return new() { Protocol = "rest", Method = "POST", Url = s.Post };
-            if (s.Put is not null) return new() { Protocol = "rest", Method = "PUT", Url = s.Put };
-            if (s.Delete is not null) return new() { Protocol = "rest", Method = "DELETE", Url = s.Delete };
+            ToolName = name,
+            Description = simple.Desc,
+            Domain = simple.Domain ?? domain,
+            InputSchema = BuildSchema(simple.Params),
+            Backend = backend,
+            Enabled = simple.Enabled,
+            IsWrite = isWrite,
+            ChatApprovalAllowed = simple.ChatApproval
+        };
+    }
 
-            if (s.SqlTemplate is not null)
+    private static BackendConfig? BuildBackend(SimpleSkill s)
+    {
+        var count = new[] { s.Get, s.Post, s.Put, s.Delete, s.Soap, s.SqlTemplate, s.Script }
+            .Count(x => x != null);
+        if (count != 1) throw new FormatException("必须且只能配置一个执行方式 get/post/put/delete/soap/sql/script");
+        if (s.Get is not null) return new() { Protocol = "rest", Method = "GET", Url = s.Get };
+        if (s.Post is not null) return new() { Protocol = "rest", Method = "POST", Url = s.Post };
+        if (s.Put is not null) return new() { Protocol = "rest", Method = "PUT", Url = s.Put };
+        if (s.Delete is not null) return new() { Protocol = "rest", Method = "DELETE", Url = s.Delete };
+        if (s.SqlTemplate is not null)
+        {
+            if (string.IsNullOrWhiteSpace(s.DbAlias)) throw new FormatException("SQL Skill 缺少 db_alias");
+            return new() { Protocol = "sql", DbAlias = s.DbAlias, SqlTemplate = s.SqlTemplate };
+        }
+        if (s.Script is not null)
+        {
+            var target = s.PowerShellTarget ?? "exchange";
+            if (target != "local" && target != "exchange")
+                throw new FormatException("powershell_target 只能为 local 或 exchange");
+            return new() { Protocol = "powershell", ScriptTemplate = s.Script, PowerShellTarget = target };
+        }
+        return new()
+        {
+            Protocol = "soap", Method = "POST", Url = s.Soap,
+            SoapAction = s.Action, SoapBody = s.Body,
+            SoapMethod = s.SoapMethod, SoapNamespace = s.SoapNamespace
+        };
+    }
+
+    private static JsonElement BuildSchema(Dictionary<string, string>? parameters)
+    {
+        var properties = new JsonObject();
+        var required = new JsonArray();
+        if (parameters != null)
+        {
+            foreach (var (name, definition) in parameters)
             {
-                return new() { Protocol = "sql", DbAlias = s.DbAlias, SqlTemplate = s.SqlTemplate };
+                var raw = definition?.Trim() ?? "";
+                var optional = raw.StartsWith('?');
+                if (optional) raw = raw[1..].Trim();
+                var space = raw.IndexOf(' ');
+                var type = NormalizeType(space < 0 ? raw : raw[..space]);
+                var description = space < 0 ? "" : raw[(space + 1)..];
+                properties[name] = new JsonObject { ["type"] = type, ["description"] = description };
+                if (!optional) required.Add(name);
             }
+        }
+        return JsonSerializer.SerializeToElement(new JsonObject
+        {
+            ["type"] = "object", ["properties"] = properties, ["required"] = required,
+            ["additionalProperties"] = false
+        });
+    }
 
-            //识别 PowerShell 脚本
-            if (s.Script is not null)
-            {
-                return new() { Protocol = "powershell", ScriptTemplate = s.Script };
-            }
+    private static string NormalizeType(string type) => type.ToLowerInvariant() switch
+    {
+        "int" or "integer" => "integer",
+        "num" or "number" or "float" or "double" => "number",
+        "bool" or "boolean" => "boolean",
+        "arr" or "array" => "array",
+        "obj" or "object" => "object",
+        _ => "string"
+    };
 
-            if (s.Soap is not null)
+    public SkillDefinition? Get(string name)
+    {
+        lock (_reloadGate) return _skills.TryGetValue(name, out var skill) ? skill : null;
+    }
+
+    public List<SkillSummary> Search(string query, int topK)
+    {
+        var q = query?.Trim() ?? "";
+        var words = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        lock (_reloadGate)
+        {
+            var candidates = _skills.Values.Where(s => s.Enabled);
+            return candidates
+                .Select(s => new { Skill = s, Score = Score(s, q, words) })
+                .Where(x => string.IsNullOrEmpty(q) || x.Score > 0)
+                .OrderByDescending(x => x.Score)
+                .ThenBy(x => x.Skill.ToolName, StringComparer.OrdinalIgnoreCase)
+                .Take(Math.Clamp(topK, 1, 50))
+                .Select(x => new SkillSummary(x.Skill.ToolName, x.Skill.Description, x.Skill.Domain))
+                .ToList();
+        }
+    }
+
+    private static int Score(SkillDefinition s, string query, string[] words)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return 1;
+        var score = 0;
+        if (s.ToolName.Equals(query, StringComparison.OrdinalIgnoreCase)) score += 100;
+        if (s.ToolName.Contains(query, StringComparison.OrdinalIgnoreCase)) score += 30;
+        if (s.Description?.Contains(query, StringComparison.OrdinalIgnoreCase) == true) score += 20;
+        if (s.Domain?.Contains(query, StringComparison.OrdinalIgnoreCase) == true) score += 10;
+        foreach (var word in words)
+        {
+            if (s.ToolName.Contains(word, StringComparison.OrdinalIgnoreCase)) score += 8;
+            if (s.Description?.Contains(word, StringComparison.OrdinalIgnoreCase) == true) score += 5;
+            if (s.Domain?.Contains(word, StringComparison.OrdinalIgnoreCase) == true) score += 3;
+        }
+        return score;
+    }
+
+    public Task<ExecResult> ExecuteAsync(string toolName, JsonElement args, IHttpClientFactory httpFactory)
+    {
+        var skill = Get(toolName);
+        if (skill is null || !skill.Enabled)
+            return Task.FromResult(ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 不存在或已禁用", 404));
+
+        var validation = ValidateArguments(skill.InputSchema, args);
+        if (validation is not null)
+            return Task.FromResult(ExecResult.Fail("INVALID_PARAMS", validation, 400));
+
+        if (skill.IsWrite)
+        {
+            if (!_config.GetValue("Relay:EnableWrites", false))
+                return Task.FromResult(ExecResult.Fail("WRITE_DISABLED", "写操作未开启：请设置 Relay:EnableWrites=true", 403));
+
+            var mode = (_config["Relay:ApprovalMode"] ?? "web").ToLowerInvariant();
+            if (mode is not ("client" or "web" or "chat"))
+                return Task.FromResult(ExecResult.Fail("CONFIG_ERROR", "Relay:ApprovalMode 只能是 client、web、chat", 500));
+            if (mode == "web" && string.IsNullOrWhiteSpace(_config["Relay:ApprovalKey"]))
+                return Task.FromResult(ExecResult.Fail("WRITE_DISABLED", "网页审批必须配置独立的 Relay:ApprovalKey", 403));
+            if (mode == "client" && string.IsNullOrWhiteSpace(_config["Relay:ClientConfirmKey"]))
+                return Task.FromResult(ExecResult.Fail("WRITE_DISABLED", "客户端审批必须配置 Relay:ClientConfirmKey", 403));
+            var apiKey = _config["Relay:ApiKey"];
+            var approvalSecret = mode == "client" ? _config["Relay:ClientConfirmKey"] : _config["Relay:ApprovalKey"];
+            if (mode != "chat" && Program.FixedTimeEquals(apiKey, approvalSecret))
+                return Task.FromResult(ExecResult.Fail("CONFIG_ERROR", "独立审批密钥不能与 ApiKey 相同", 403));
+            if (mode == "chat" && (!_config.GetValue("Relay:ChatApprovalEnabled", false) || !skill.ChatApprovalAllowed))
+                return Task.FromResult(ExecResult.Fail("WRITE_DISABLED",
+                    "聊天审批需要设置 ChatApprovalEnabled=true 且在该 Skill 配置 chat_approval=true", 403));
+
+            // Bind the approval to the exact Skill and input values. The submitted approval ID
+            // cannot change the captured operation; changes require a new request.
+            var capturedArgs = args.ValueKind == JsonValueKind.Object
+                ? args.Clone() : JsonSerializer.SerializeToElement(new Dictionary<string, object>());
+            var summary = BuildApprovalSummary(skill, capturedArgs);
+            var ticket = _approvals.Enqueue(summary, mode, skill.ChatApprovalAllowed,
+                () => ExecuteBackendAsync(skill, capturedArgs, httpFactory));
+            if (ticket is null)
+                return Task.FromResult(ExecResult.Fail("BUSY", "待审批队列已满", 429));
+
+            var publicBase = (_config["Relay:ApprovalPublicBaseUrl"] ?? "http://127.0.0.1:54321").TrimEnd('/');
+            var approvalUrl = mode == "web" ? $"{publicBase}/approve/{ticket.Id}" : null;
+            var message = mode switch
             {
-                return new()
+                "client" => "请使用 MCP 客户端原生确认窗口批准；不支持交互确认的客户端不会执行此操作。",
+                "web" => "请打开独立审批网页审核并确认，不要重新提交写操作。",
+                _ => "低安全级别聊天确认：请等待运维人员明确回复完整确认文字，随后才能调用 ConfirmChatApproval。"
+            };
+            return Task.FromResult(ExecResult.Fail("REQUIRE_APPROVAL", message, 403,
+                new
                 {
-                    Protocol = "soap",
-                    Method = "POST",
-                    Url = s.Soap,
-                    SoapAction = s.Action,
-                    SoapBody = s.Body,
-                    SoapMethod = s.SoapMethod,
-                    SoapNamespace = s.SoapNamespace
-                };
-            }
-            return null;
+                    approval_id = ticket.Id,
+                    mode = mode,
+                    summary = summary,
+                    approval_url = approvalUrl,
+                    confirmation_phrase = mode == "chat" ? ticket.ChatPhrase : null,
+                    expires_in_minutes = Math.Clamp(_config.GetValue("Relay:ApprovalTtlMinutes", 5), 1, 60)
+                }));
         }
+        return ExecuteBackendAsync(skill, args, httpFactory);
+    }
 
-        // 👇 给读取字典的方法加上锁，确保在热加载替换字典的一瞬间，不会报空引用异常
-        public SkillDefinition? Get(string name)
+    private static string BuildApprovalSummary(SkillDefinition skill, JsonElement args)
+    {
+        var values = new Dictionary<string, string>();
+        if (args.ValueKind == JsonValueKind.Object)
+            foreach (var property in args.EnumerateObject())
+                values[property.Name] = new[] { "password", "passwd", "pwd", "token", "secret", "key" }
+                    .Any(x => property.Name.Contains(x, StringComparison.OrdinalIgnoreCase))
+                    ? "[REDACTED]" : property.Value.ToString();
+        var backend = skill.Backend!;
+        var action = backend.Protocol switch
         {
-            lock (_lockObj)
-            {
-                return _skills.TryGetValue(name, out var s) ? s : null;
-            }
+            "sql" => $"SQL database={backend.DbAlias}",
+            "rest" => $"REST method={backend.Method}",
+            "soap" => $"SOAP method={backend.SoapMethod ?? backend.SoapAction}",
+            "powershell" => $"PowerShell target={backend.PowerShellTarget}",
+            _ => backend.Protocol ?? "unknown"
+        };
+        return $"Skill: {skill.ToolName}\nDescription: {skill.Description}\nAction: {action}\nArgs: {JsonSerializer.Serialize(values)}";
+    }
+
+    private static string? ValidateArguments(JsonElement schema, JsonElement args)
+    {
+        if (args.ValueKind != JsonValueKind.Object && args.ValueKind != JsonValueKind.Undefined)
+            return "args 必须是 JSON 对象";
+        var props = schema.GetProperty("properties");
+        var supplied = args.ValueKind == JsonValueKind.Object
+            ? args.EnumerateObject().ToDictionary(x => x.Name, x => x.Value, StringComparer.Ordinal)
+            : new Dictionary<string, JsonElement>();
+        foreach (var req in schema.GetProperty("required").EnumerateArray())
+        {
+            var name = req.GetString()!;
+            if (!supplied.TryGetValue(name, out var value) || value.ValueKind == JsonValueKind.Null ||
+                (value.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(value.GetString())))
+                return $"缺少必填字段: {name}";
         }
-
-        public List<SkillSummary> Search(string query, int topK)
+        foreach (var (name, value) in supplied)
         {
-            var q = query?.Trim() ?? "";
-            lock (_lockObj)
+            if (!props.TryGetProperty(name, out var definition)) return $"未知参数: {name}";
+            if (value.ValueKind == JsonValueKind.Null) continue;
+            var type = definition.GetProperty("type").GetString();
+            var matches = type switch
             {
-                IEnumerable<SkillDefinition> all = _skills.Values.Where(s => s.Enabled);
-                if (!string.IsNullOrEmpty(q))
-                {
-                    all = all.Where(s =>
-                        s.ToolName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                        (s.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        (s.Domain?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
-                }
-                return all.Take(topK).Select(s => new SkillSummary(s.ToolName, s.Description, s.Domain)).ToList();
-            }
+                "string" => value.ValueKind == JsonValueKind.String,
+                "number" => value.ValueKind == JsonValueKind.Number,
+                "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _),
+                "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+                "array" => value.ValueKind == JsonValueKind.Array,
+                "object" => value.ValueKind == JsonValueKind.Object,
+                _ => false
+            };
+            if (!matches) return $"参数 {name} 类型应为 {type}";
         }
+        return null;
+    }
 
-        public async Task<ExecResult> ExecuteAsync(string toolName, JsonElement args, IHttpClientFactory httpFactory)
+    private async Task<ExecResult> ExecuteBackendAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory httpFactory)
+    {
+        try
         {
-            SkillDefinition? skill;
-            lock (_lockObj)
-            {
-                _skills.TryGetValue(toolName, out skill);
-            }
-
-            if (skill == null)
-                return ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 不存在", 404);
-            if (!skill.Enabled)
-                return ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 已禁用", 404);
-
-            var missing = CheckRequired(skill.InputSchema, args);
-            if (missing is not null)
-                return ExecResult.Fail("INVALID_PARAMS", $"缺少必填字段: {missing}", 400);
-
             return skill.Backend?.Protocol switch
             {
                 "rest" => await ExecuteRestAsync(skill, args, httpFactory),
                 "soap" => await ExecuteSoapAsync(skill, args, httpFactory),
-                "sql" => await ExecuteSqlTemplateAsync(skill, args),
-                "powershell" => await ExecutePowerShellAsync(skill, args),                 
-                _ => ExecResult.Fail("BACKEND_ERROR", "不支持的协议", 500)
+                "sql" => await DbQueryRunner.ExecuteAsync(_config, skill.Backend.DbAlias,
+                    skill.Backend.SqlTemplate!, args, _logger),
+                "powershell" => await ExecutePowerShellAsync(skill, args),
+                _ => ExecResult.Fail("BACKEND_ERROR", "不支持的执行协议", 500)
             };
         }
-
-        private static string? CheckRequired(JsonElement schema, JsonElement args)
+        catch (TaskCanceledException)
         {
-            if (!schema.TryGetProperty("required", out var required) || required.ValueKind != JsonValueKind.Array)
-                return null;
-            foreach (var item in required.EnumerateArray())
-            {
-                var name = item.GetString();
-                if (name is null) continue;
-                if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty(name, out _))
-                    return name;
-            }
-            return null;
+            return ExecResult.Fail("TIMEOUT", "后端执行超时；写操作请先核实结果，不能直接重试", 504);
         }
-
-        private static void InjectAuthHeaders(HttpRequestMessage request, BackendConfig backend)
+        catch (Exception ex)
         {
-            if (string.IsNullOrEmpty(backend.Token) || string.IsNullOrEmpty(backend.AuthType))
-                return;
-
-            if (backend.AuthType.Equals("bearer", StringComparison.OrdinalIgnoreCase))
-                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", backend.Token);
-            else if (backend.AuthType.Equals("basic", StringComparison.OrdinalIgnoreCase))
-            {
-                var bytes = System.Text.Encoding.UTF8.GetBytes(backend.Token);
-                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
-            }
-            else if (backend.AuthType.Equals("header", StringComparison.OrdinalIgnoreCase))
-            {
-                var headerName = string.IsNullOrEmpty(backend.TokenKey) ? "X-Access-Token" : backend.TokenKey;
-                request.Headers.Add(headerName, backend.Token);
-            }
+            _logger.LogWarning("Skill {Skill} failed: {Error}", skill.ToolName, ex.GetType().Name);
+            return ExecResult.Fail("BACKEND_ERROR", $"执行失败 ({ex.GetType().Name})", 502);
         }
+    }
 
-        private static async Task<ExecResult> ExecuteRestAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory httpFactory)
+    private static void InjectAuthHeaders(HttpRequestMessage request, BackendConfig backend)
+    {
+        if (string.IsNullOrEmpty(backend.Token) || string.IsNullOrWhiteSpace(backend.AuthType)) return;
+        if (backend.AuthType.Equals("bearer", StringComparison.OrdinalIgnoreCase))
+            request.Headers.Authorization = new("Bearer", backend.Token);
+        else if (backend.AuthType.Equals("basic", StringComparison.OrdinalIgnoreCase))
+            request.Headers.Authorization = new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(backend.Token)));
+        else if (backend.AuthType.Equals("header", StringComparison.OrdinalIgnoreCase))
+            request.Headers.Add(backend.HeaderName ?? "X-Access-Token", backend.Token);
+    }
+
+    private async Task<ExecResult> ExecuteRestAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory factory)
+    {
+        var backend = skill.Backend!;
+        var url = backend.Url!;
+        var remaining = new Dictionary<string, JsonElement>();
+        if (args.ValueKind == JsonValueKind.Object)
+            foreach (var parameter in args.EnumerateObject())
+            {
+                var placeholder = "{" + parameter.Name + "}";
+                if (url.Contains(placeholder, StringComparison.Ordinal))
+                    url = url.Replace(placeholder, Uri.EscapeDataString(parameter.Value.ToString()));
+                else remaining[parameter.Name] = parameter.Value;
+            }
+        if (Regex.IsMatch(url, @"\{[a-zA-Z_][a-zA-Z0-9_]*\}"))
+            return ExecResult.Fail("INVALID_PARAMS", "REST URL 存在未填写参数", 400);
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
+            (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+            return ExecResult.Fail("INVALID_PARAMS", "REST URL 必须是 http/https 地址", 400);
+
+        var method = new HttpMethod(backend.Method ?? "GET");
+        if (method == HttpMethod.Get && remaining.Count > 0)
         {
-            var url = skill.Backend!.Url!;
-            var remaining = new Dictionary<string, object?>();
+            var query = string.Join("&", remaining.Select(p =>
+                $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value.ToString())}"));
+            url += (url.Contains('?') ? "&" : "?") + query;
+        }
+        using var request = new HttpRequestMessage(method, url);
+        InjectAuthHeaders(request, backend);
+        if (method != HttpMethod.Get)
+            request.Content = new StringContent(JsonSerializer.Serialize(remaining), Encoding.UTF8, "application/json");
 
+        var client = factory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(Math.Clamp(_config.GetValue("Relay:HttpTimeoutSeconds", 30), 1, 300));
+        using var response = await client.SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+            return ExecResult.Fail("BACKEND_ERROR", $"REST HTTP {(int)response.StatusCode}", (int)response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        try { return ExecResult.Success(JsonSerializer.Deserialize<JsonElement>(body)); }
+        catch (JsonException) { return ExecResult.Success(body); }
+    }
+
+    private async Task<ExecResult> ExecuteSoapAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory factory)
+    {
+        var backend = skill.Backend!;
+        var body = backend.SoapBody;
+        if (string.IsNullOrWhiteSpace(body) && !string.IsNullOrWhiteSpace(backend.SoapMethod))
+        {
+            if (!ParameterName.IsMatch(backend.SoapMethod))
+                return ExecResult.Fail("INVALID_PARAMS", "SOAP 方法名格式不合法", 400);
+            var sb = new StringBuilder();
+            sb.Append("<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" ");
+            sb.Append("xmlns:tem=\"").Append(SecurityElement.Escape(backend.SoapNamespace ?? "")).Append("\">");
+            sb.Append("<soapenv:Header/><soapenv:Body><tem:").Append(backend.SoapMethod).Append('>');
             if (args.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var prop in args.EnumerateObject())
-                {
-                    var placeholder = "{" + prop.Name + "}";
-                    if (url.Contains(placeholder))
-                        url = url.Replace(placeholder, Uri.EscapeDataString(prop.Value.ToString()));
-                    else
-                        remaining[prop.Name] = prop.Value;
-                }
-            }
-
-            var client = httpFactory.CreateClient();
-            var method = new HttpMethod(skill.Backend.Method ?? "GET");
-            var request = new HttpRequestMessage(method, url);
-
-            InjectAuthHeaders(request, skill.Backend);
-
-            HttpResponseMessage resp;
-
-            if (method == HttpMethod.Get)
-            {
-                var qs = string.Join("&", remaining.Select(kv =>
-                    $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value?.ToString() ?? "")}"));
-
-                if (!string.IsNullOrEmpty(qs))
-                {
-                    url += (url.Contains('?') ? "&" : "?") + qs;
-                    request.RequestUri = new Uri(url);
-                }
-                resp = await client.SendAsync(request);
-            }
-            else
-            {
-                var json = JsonSerializer.Serialize(remaining);
-                request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-                resp = await client.SendAsync(request);
-            }
-
-            var body = await resp.Content.ReadAsStringAsync();
-            if (!resp.IsSuccessStatusCode)
-                return ExecResult.Fail("BACKEND_ERROR", $"后端返回 {(int)resp.StatusCode}: {body}", (int)resp.StatusCode);
-
-            try { return ExecResult.Success(JsonSerializer.Deserialize<JsonElement>(body)); }
-            catch { return ExecResult.Success(body); }
+                foreach (var property in args.EnumerateObject())
+                    sb.Append("<tem:").Append(property.Name).Append('>')
+                        .Append(SecurityElement.Escape(property.Value.ToString()))
+                        .Append("</tem:").Append(property.Name).Append('>');
+            sb.Append("</tem:").Append(backend.SoapMethod).Append("></soapenv:Body></soapenv:Envelope>");
+            body = sb.ToString();
         }
+        if (string.IsNullOrWhiteSpace(body))
+            return ExecResult.Fail("INVALID_PARAMS", "未配置 SOAP body 或 soap_method", 400);
+        if (!string.IsNullOrWhiteSpace(backend.SoapBody) && args.ValueKind == JsonValueKind.Object)
+            foreach (var property in args.EnumerateObject())
+                body = body.Replace("{" + property.Name + "}", SecurityElement.Escape(property.Value.ToString()));
+        if (Regex.IsMatch(body, @"\{[a-zA-Z_][a-zA-Z0-9_]*\}"))
+            return ExecResult.Fail("INVALID_PARAMS", "SOAP 模板存在未填写参数", 400);
 
-        private static async Task<ExecResult> ExecuteSoapAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory httpFactory)
+        using var request = new HttpRequestMessage(HttpMethod.Post, backend.Url)
         {
-            var body = skill.Backend!.SoapBody;
+            Content = new StringContent(body, Encoding.UTF8, "text/xml")
+        };
+        if (!string.IsNullOrWhiteSpace(backend.SoapAction)) request.Headers.Add("SOAPAction", backend.SoapAction);
+        InjectAuthHeaders(request, backend);
+        var client = factory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(Math.Clamp(_config.GetValue("Relay:HttpTimeoutSeconds", 30), 1, 300));
+        using var response = await client.SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+            return ExecResult.Fail("BACKEND_ERROR", $"SOAP HTTP {(int)response.StatusCode}", (int)response.StatusCode);
+        return ExecResult.Success(await response.Content.ReadAsStringAsync());
+    }
 
-            if (string.IsNullOrEmpty(body) && !string.IsNullOrEmpty(skill.Backend.SoapMethod))
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append("<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" ");
-                sb.Append($"xmlns:tem=\"{skill.Backend.SoapNamespace}\">");
-                sb.Append("<soapenv:Header/><soapenv:Body>");
-                sb.Append($"<tem:{skill.Backend.SoapMethod}>");
+    private Task<ExecResult> ExecutePowerShellAsync(SkillDefinition skill, JsonElement args)
+        => Task.Run(() => InvokePowerShell(skill, args));
 
-                if (args.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in args.EnumerateObject())
-                    {
-                        var val = SecurityElement.Escape(prop.Value.ToString());
-                        sb.Append($"<tem:{prop.Name}>{val}</tem:{prop.Name}>");
-                    }
-                }
-
-                sb.Append($"</tem:{skill.Backend.SoapMethod}>");
-                sb.Append("</soapenv:Body></soapenv:Envelope>");
-                body = sb.ToString();
-            }
-
-            if (string.IsNullOrEmpty(body))
-                return ExecResult.Fail("BACKEND_ERROR", "未配置 SOAP Body 或 Method", 500);
-
-            if (!string.IsNullOrEmpty(skill.Backend.SoapBody) && args.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var prop in args.EnumerateObject())
-                    body = body.Replace("{" + prop.Name + "}", SecurityElement.Escape(prop.Value.ToString()));
-            }
-
-            var req = new HttpRequestMessage(HttpMethod.Post, skill.Backend.Url)
-            {
-                Content = new StringContent(body, System.Text.Encoding.UTF8, "text/xml")
-            };
-
-            if (!string.IsNullOrEmpty(skill.Backend.SoapAction))
-                req.Headers.Add("SOAPAction", skill.Backend.SoapAction);
-
-            InjectAuthHeaders(req, skill.Backend);
-
-            var resp = await httpFactory.CreateClient().SendAsync(req);
-            var text = await resp.Content.ReadAsStringAsync();
-
-            if (!resp.IsSuccessStatusCode)
-                return ExecResult.Fail("BACKEND_ERROR", $"SOAP 返回 {(int)resp.StatusCode}: {text}", (int)resp.StatusCode);
-
-            return ExecResult.Success(text);
-        }
-
-        private async Task<ExecResult> ExecuteSqlTemplateAsync(SkillDefinition skill, JsonElement args)
+    private ExecResult InvokePowerShell(SkillDefinition skill, JsonElement args)
+    {
+        try
         {
-            var dbConfig = _config.GetSection($"DatabaseSettings:Connections:{skill.Backend!.DbAlias}");
-            var providerName = dbConfig["Provider"];
-            var connStr = dbConfig["ConnectionString"];
+            var backend = skill.Backend!;
+            using var runspace = CreatePowerShellRunspace(backend.PowerShellTarget);
+            runspace.Open();
+            using var ps = PowerShell.Create();
+            ps.Runspace = runspace;
 
-            if (string.IsNullOrEmpty(connStr) || string.IsNullOrEmpty(providerName))
-                return ExecResult.Fail("BACKEND_ERROR", $"数据库配置 {skill.Backend.DbAlias} 不存在", 500);
-
-            try
+            // Never interpolate argument values into source code. Bind positional
+            // parameters to a scriptblock and refer to them as $variable in JSON.
+            var names = skill.InputSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToList();
+            var preamble = "param(" + string.Join(", ", names.Select(n => "$" + n)) + ")\n";
+            ps.AddScript(preamble + backend.ScriptTemplate, useLocalScope: true);
+            foreach (var name in names)
             {
-                var factory = DbProviderFactories.GetFactory(providerName);
-                using var conn = factory.CreateConnection();
-                conn!.ConnectionString = connStr;
-                await conn.OpenAsync();
-
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = skill.Backend.SqlTemplate;
-
-                if (args.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in args.EnumerateObject())
+                object? value = null;
+                if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(name, out var input))
+                    value = input.ValueKind switch
                     {
-                        var placeholder = "{" + prop.Name + "}";
-                        if (cmd.CommandText.Contains(placeholder))
-                        {
-                            cmd.CommandText = cmd.CommandText.Replace(placeholder, "@" + prop.Name);
-                            var p = cmd.CreateParameter();
-                            p.ParameterName = "@" + prop.Name;
-                            p.Value = prop.Value.ValueKind == JsonValueKind.Number ? prop.Value.GetDecimal() : prop.Value.ToString();
-                            cmd.Parameters.Add(p);
-                        }
-                    }
-                }
-
-                using var reader = await cmd.ExecuteReaderAsync();
-
-                if (reader.FieldCount == 0)
-                {
-                    return ExecResult.Success(new { type = "affectedRows", message = "执行成功", affectedRows = reader.RecordsAffected });
-                }
-
-                var dataList = new List<Dictionary<string, object>>();
-                int rowCount = 0;
-                while (await reader.ReadAsync() && rowCount < 100)
-                {
-                    var row = new Dictionary<string, object>();
-                    for (int i = 0; i < reader.FieldCount; i++)
-                        row[reader.GetName(i)] = reader.GetValue(i);
-                    dataList.Add(row);
-                    rowCount++;
-                }
-
-                if (dataList.Count == 1) return ExecResult.Success(new { type = "singleRow", data = dataList[0] });
-                return ExecResult.Success(new { type = "dataset", rowCount = dataList.Count, data = dataList });
+                        JsonValueKind.String => input.GetString(),
+                        JsonValueKind.Number when input.TryGetInt64(out var number) => number,
+                        JsonValueKind.Number => input.GetDouble(),
+                        JsonValueKind.True => true,
+                        JsonValueKind.False => false,
+                        JsonValueKind.Null => null,
+                        _ => throw new ArgumentException("PowerShell 参数只接受简单类型")
+                    };
+                ps.AddArgument(value);
             }
-            catch (Exception ex)
+            var output = ps.Invoke();
+            if (ps.HadErrors)
             {
-                return ExecResult.Fail("BACKEND_ERROR", $"SQL模板执行失败: {ex.Message}", 500);
+                _logger.LogWarning("PowerShell Skill {Skill} returned errors", skill.ToolName);
+                return ExecResult.Fail("POWERSHELL_ERROR", "PowerShell 执行失败，请检查服务端日志", 502);
             }
+            return ExecResult.Success(output.Select(ToSerializablePowerShellValue).ToArray());
         }
-
-        #region PowerShell
-        private async Task<ExecResult> ExecutePowerShellAsync(SkillDefinition skill, JsonElement args)
+        catch (Exception ex)
         {
-            try
-            {
-                // 1. 获取配置的凭据
-                var exUrl = _config["PowerShellSettings:ExchangeServerUrl"];
-                var user = _config["PowerShellSettings:Username"];
-                var pwd = _config["PowerShellSettings:Password"];
-
-                if (string.IsNullOrEmpty(exUrl) || string.IsNullOrEmpty(user))
-                    return ExecResult.Fail("BACKEND_ERROR", "未配置 Exchange 远程连接信息", 500);
-
-                // 2. 构建凭据和连接信息
-                var securePwd = new SecureString();
-                foreach (char c in pwd) securePwd.AppendChar(c);
-                var credential = new PSCredential(user, securePwd);
-
-                // 构建远程连接对象
-                var connectionInfo = new WSManConnectionInfo(new Uri(exUrl), "http://schemas.microsoft.com/powershell/Microsoft.Exchange", credential);
-
-                // 3. 创建远程 Runspace
-                using var runspace = RunspaceFactory.CreateRunspace(connectionInfo);
-                runspace.Open();
-
-                using var ps = PowerShell.Create();
-                ps.Runspace = runspace;
-
-                // 4. 替换参数并执行
-                var script = skill.Backend!.ScriptTemplate;
-                if (args.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in args.EnumerateObject())
-                    {
-                        // 简单的参数替换（注意防范 PowerShell 注入，生产环境建议对参数做 Base64 编码后解码）
-                        script = script.Replace("{" + prop.Name + "}", prop.Value.ToString());
-                    }
-                }
-
-                ps.AddScript(script);
-                var results = ps.Invoke();
-
-                if (ps.HadErrors)
-                {
-                    var errors = string.Join("; ", ps.Streams.Error.Select(e => e.ToString()));
-                    return ExecResult.Fail("POWERSHELL_ERROR", errors, 500);
-                }
-
-                // 5. 将 PSObject 转换为干净的 JSON
-                var output = results.Select(r => r.BaseObject).ToList();
-                if (output.Count == 0) return ExecResult.Success(new { message = "查询成功，但无结果返回" });
-
-                return ExecResult.Success(output);
-            }
-            catch (Exception ex)
-            {
-                return ExecResult.Fail("EXECUTION_ERROR", ex.Message, 500);
-            }
+            _logger.LogWarning("PowerShell Skill {Skill} failed: {Type}", skill.ToolName, ex.GetType().Name);
+            return ExecResult.Fail("EXECUTION_ERROR", $"PowerShell 执行失败 ({ex.GetType().Name})", 502);
         }
-        #endregion
+    }
+
+    private static object? ToSerializablePowerShellValue(object? input)
+    {
+        if (input is null) return null;
+        if (input is PSObject ps)
+        {
+            if (ps.BaseObject is PSCustomObject)
+                return ps.Properties.ToDictionary(p => p.Name,
+                    p => ToSerializablePowerShellValue(p.Value), StringComparer.OrdinalIgnoreCase);
+            return ToSerializablePowerShellValue(ps.BaseObject);
+        }
+        if (input is string or bool or byte or short or int or long or float or double or decimal or DateTime or DateTimeOffset or Guid)
+            return input;
+        if (input is IDictionary dictionary)
+        {
+            var result = new Dictionary<string, object?>();
+            foreach (DictionaryEntry entry in dictionary)
+                result[entry.Key?.ToString() ?? "null"] = ToSerializablePowerShellValue(entry.Value);
+            return result;
+        }
+        if (input is IEnumerable list && input is not string)
+            return list.Cast<object?>().Take(1000).Select(ToSerializablePowerShellValue).ToArray();
+        // Avoid circular references and giant embedded PowerShell objects.
+        return input.ToString();
+    }
+
+    private Runspace CreatePowerShellRunspace(string? target)
+    {
+        if (target == "local") return RunspaceFactory.CreateRunspace();
+        var url = _config["PowerShellSettings:ExchangeServerUrl"];
+        var username = _config["PowerShellSettings:Username"];
+        var password = _config["PowerShellSettings:Password"];
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+            throw new InvalidOperationException("缺少远程 Exchange 凭证");
+        var secure = new SecureString();
+        foreach (var character in password) secure.AppendChar(character);
+        secure.MakeReadOnly();
+        var credentials = new PSCredential(username, secure);
+        var connection = new WSManConnectionInfo(new Uri(url),
+            "http://schemas.microsoft.com/powershell/Microsoft.Exchange", credentials);
+        return RunspaceFactory.CreateRunspace(connection);
+    }
+
+    public void Dispose()
+    {
+        if (_watcher is not null)
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Changed -= OnFileChanged;
+            _watcher.Created -= OnFileChanged;
+            _watcher.Deleted -= OnFileChanged;
+            _watcher.Renamed -= OnFileChanged;
+            _watcher.Dispose();
+        }
     }
 }

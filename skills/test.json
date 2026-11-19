@@ -1,9 +1,12 @@
 {
   "erp_get_order": {
     "desc": "按订单号查询 ERP 订单详情",
-    "params": { "order_id": "string 订单号" },
-    "enabled": true,
-    "get": "http://10.0.0.21:8080/api/orders/{order_id}"
+    "params": {
+      "order_id": "string 订单号"
+    },
+    "enabled": false,
+    "get": "http://127.0.0.1:8080/api/orders/{order_id}",
+    "risk": "read"
   },
   "erp_create_order": {
     "desc": "在 ERP 系统中创建一个新订单",
@@ -12,7 +15,9 @@
       "amount": "number 订单金额",
       "remark": "?string 备注信息(可选)"
     },
-    "post": "http://10.0.0.21:8080/api/orders/create"
+    "post": "http://127.0.0.1:8080/api/orders/create",
+    "enabled": false,
+    "risk": "write"
   },
   "ws_add_User": {
     "desc": "新增管理信息",
@@ -21,10 +26,12 @@
       "manage": "string 管理员",
       "password": "string 密码"
     },
-    "soap": "http://192.168.0.111:8022/User.asmx",
+    "soap": "http://127.0.0.1:8022/User.asmx",
     "action": "http://AddNewUser",
     "soap_method": "AddNewUser",
-    "soap_namespace": "http://AddNewUser/"
+    "soap_namespace": "http://AddNewUser/",
+    "enabled": false,
+    "risk": "write"
   },
   "hr_query_active_users_by_dept": {
     "desc": "按部门 ID 查询所有在职员工及所在部门",
@@ -32,6 +39,8 @@
       "deptId": "int 部门ID"
     },
     "sql": "SELECT u.name, d.dept_name FROM t_user u LEFT JOIN t_dept d ON u.dept_id = d.id WHERE u.status = 1 AND d.id = {deptId}",
-    "db_alias": "HR_MYSQL"
+    "db_alias": "HR_MYSQL",
+    "enabled": false,
+    "risk": "read"
   }
 }

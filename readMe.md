@@ -1,464 +1,1348 @@
-﻿# 🌐 Mcp-Relay.Net
+# Mcp-Relay.Net
 
-> **打通大模型与内部老系统的“最后一公里”** —— 一个基于 .NET 8 的、极其轻量的、配置驱动的 MCP (Model Context Protocol) 网关。
+> 面向个人运维人员的轻量级 AI 运维中转工具：连接数据库、REST、SOAP 和 PowerShell，让 AI 协助完成日常数据查询、跨系统排查以及经人工批准的操作。
 
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-blue.svg)](https://dotnet.microsoft.com/)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+**技术栈：** .NET 8 / ASP.NET Core Web API / Python 3.10+ / MCP（Model Context Protocol）  
+**项目定位：** 个人运维助手，优先解决传统企业多业务系统的日常运维需求。  
+**核心特点：** 配置驱动、Skill 按需发现、多协议接入、临时只读 SQL、三种可选的写操作审批方式。
 
-## 💡 为什么需要它？（背景与痛点）
+> 本项目适合个人及小范围可信环境使用，尚不应视为已完成生产安全认证的企业级平台。文档区分当前已支持的功能和未来规划。
 
-在企业内部接入 AI 智能体时，由于历史原因和技术栈的复杂，往往会面临以下极其棘手的困境：
+## 目录
 
-1. **“改不动”的历史包袱**：有标准的 REST (Java/Spring)，有老掉牙的 SOAP (WebService)，甚至还有连源码都没有的第三方黑盒系统。站在运维人员的角度，不可能为了迎合 AI 标准（如 MCP）去重写所有底层接口；而历经人员更迭，也往往找不到当初的开发人员去改造。
-2. **“零侵入”的硬性要求**：如何在不改动原有业务系统哪怕一行代码的前提下，让这些老旧系统顺滑地接入大模型，成了一个极难跨越的鸿沟。
-3. **“高频且多变”的运维查询**：日常运维需要频繁进行数据查询，目前全凭人工处理，且每次查询规则往往不同。这种繁琐的“人肉 SQL”工作亟待大模型来接管释放。
-4. **安全与发版的压力**：每加一个内部接口，如果都要重新发布 MCP 服务，运维成本极高；同时，绝对不能让大模型直接拿着数据库账号密码和内部 Token 裸奔。
+1. [为什么开发这个项目](#1-为什么开发这个项目)
+2. [定位与典型场景](#2-定位与典型场景)
+3. [整体架构与核心原理](#3-整体架构与核心原理)
+4. [项目目录与运行环境](#4-项目目录与运行环境)
+5. [安装、配置与启动](#5-安装配置与启动)
+6. [配置文件说明](#6-配置文件说明)
+7. [Skill 机制与配置规范](#7-skill-机制与配置规范)
+8. [REST 接口接入](#8-rest-接口接入)
+9. [SOAP WebService 接入](#9-soap-webservice-接入)
+10. [SQL 查询与固定 SQL Skill](#10-sql-查询与固定-sql-skill)
+11. [PowerShell 运维](#11-powershell-运维)
+12. [写操作审批：三种可选模式](#12-写操作审批三种可选模式)
+13. [MCP 与 HTTP 接口](#13-mcp-与-http-接口)
+14. [调试与测试](#14-调试与测试)
+15. [常见问题](#15-常见问题)
+16. [安全边界与已知限制](#16-安全边界与已知限制)
+17. [后续改进方向](#17-后续改进方向)
 
-## 🚀 Mcp-Relay.Net 是什么？
+---
 
-**Mcp-Relay.Net** 正是站在一线运维与开发者视角，量身打造的一款**“轻量级内部 AI 运维网关”**。
+## 1. 为什么开发这个项目
 
-它采用 `智能体 -> MCP (Python) -> 网关 (.NET 8) -> 内部系统` 的分层架构。秉持**“零侵入、纯配置”**的理念，你只需修改 JSON 配置，即可实现**“5 分钟接入一个新接口，且无需重启服务”**。
+在传统企业的信息化环境中，一名运维人员往往同时负责多个业务系统：人事、邮箱、VPN、上网权限、ERP、OA 和其他历史系统。
 
-## 🧠 核心设计：双层 Skill 架构
+大量日常工作不是服务器监控或标准化部署，而是：
 
-为了让 AI 懂业务、让网关懂技术，Mcp-Relay.Net 将 `Skill` 严格划分为两层：
+- 根据用户的要求查询业务数据、核实状态、导出结果。
+- 查询业务系统没有提供的统计或组合条件。
+- 跨多个系统查找同一员工、账号、设备或业务记录。
+- 查清楚某项权限何时到期、何时发生变更、由谁操作。
+- 调用已有 REST/SOAP 接口、PowerShell 脚本或已审核的 SQL 模板完成处理。
+- 操作完成后再次查询，验证是否真正生效。
 
-*   **顶层（业务层 - 智能体提示词/描述）**：面向大模型。用自然语言描述这个 Skill 是干什么的。大模型借此理解运维人员的意图，决定何时调用。
-*   **底层（技术层 - `skills/` 文件夹下的 JSON）**：面向 .NET 网关。在这里配置真实的接口 URL、鉴权 Token、数据库方言，甚至写好复杂的 SQL 联表查询模板。网关拿到配置后，负责安全、精准地完成实际的转发与执行。
+这些系统往往已经有数据库和操作接口，但没有面向 AI 的 MCP 能力。为了接入 AI 而修改原有系统通常不现实，也没有必要。
 
-**通过这种“业务在前端，逻辑在底层”的解耦设计，运维人员只需维护几份轻量的 JSON 文件，就能把全公司各种异构系统（REST、SOAP、异构数据库）的全部能力，安全、优雅地交付给 AI。**
+**Mcp-Relay.Net 的目标，是尽量不修改原有业务系统，把已有查询和操作能力以统一方式提供给 AI 助手。**
 
-## 🏢 部署架构与配置组织
+它并不试图替代业务系统，也不负责独立完成复杂的 AI 推理。AI 负责理解运维人员的请求、选择工具和分析结果；网关负责执行真实操作、限制权限以及返回可检查的结果。
 
-在部署层面，**一个公司或部门只需要集中部署一套 Mcp-Relay.Net 即可**。它就像企业内部的 AI 神经中枢。
+## 2. 定位与典型场景
 
-为了应对复杂的内部环境，我们推荐在 `skills/` 文件夹下，**按系统或业务域进行模块化拆分**，为每个系统（如 `erp.json`、`oa.json`、`hr.json`）或每组业务单独创建一个 `.json` 文件：
+### 2.1 当前定位
+
+现阶段优先服务单个运维人员：
+
+- 轻量、易启动、尽量少配置。
+- 尽量复用已有数据库、脚本和业务接口。
+- 常用查询做成固定 Skill，临时查询交给 AI 生成只读 SQL。
+- 查询自动化，修改操作由运维人员审核批准。
+- AI 使用已有的 MCP 客户端；本项目不内置模型和聊天界面。
+
+**不是当前目标：** 通用工作流平台、多智能体平台、监控告警中心、可视化运维门户、多租户 SaaS。
+
+### 2.2 场景一：员工无法访问外网
+
+假设员工反馈：“公司系统显示我有外网权限，但现在无法访问互联网。”
+
+可能的排查过程：
+
+1. 查询员工身份及账号信息。
+2. 查询当前上网权限、权限到期时间和状态。
+3. 查询权限历史，核对是否存在删除、冻结或变更记录。
+4. 如果权限仍然有效，再查询设备注册或同步状态。
+5. 根据证据给出结论；如果需要重新下发权限，提出操作建议。
+6. 运维人员审核后，通过已配置的写 Skill 执行。
+7. 再次查询业务系统，必要时联系用户验证实际网络是否恢复。
+
+其中不应把“出现一条删除日志”直接等同于“当前权限已被删除”。应关联员工、账号、权限记录的唯一标识，并区分当前状态与历史状态。
+
+### 2.3 场景二：临时数据查询
+
+例如：“查询某部门所有受限制外发的邮箱，并列出员工卡号、姓名和邮箱地址。”
+
+- 如果存在合适的固定 SQL Skill，AI 可以直接调用。
+- 如果没有，AI 可以依据**你提供给 AI 的业务表结构和关联规则**生成只读 SQL，再调用 `ExecuteSql`。
+- 结果行数较多时，当前程序会截断返回，**尚不支持完整 CSV/Excel 导出**。
+
+### 2.4 场景三：调用已有接口处理业务问题
+
+例如业务系统中已经有“重新下发权限”的 REST/SOAP 接口，不需要重新实现该业务逻辑。
+
+为该接口配置一个写类型 Skill，AI 可以提出执行请求；服务端创建待审批任务。可在配置中选择 **MCP 客户端交互确认、内置审批网页、聊天确认** 三种模式，具体限制见第 12 节。
+
+---
+
+## 3. 整体架构与核心原理
+
+```text
+运维人员
+   |
+   v
+AI 客户端（理解问题、规划查询、分析结果）
+   |
+   | MCP / stdio
+   v
+Mcp_Server.py（轻量 MCP 适配层）
+   |
+   | HTTP + X-Api-Key
+   v
+Mcp-Relay.Net（.NET 8）
+   |-- Skill 注册、搜索和参数校验
+   |-- SQL 查询与结果处理
+   |-- REST / SOAP / PowerShell 执行
+   |-- 写操作风险识别和待审批操作队列
+   |
+   +--> SQL Server / MySQL / SQLite
+   +--> REST API
+   +--> SOAP WebService
+   +--> 本机 PowerShell / 远程 Exchange
+```
+
+### 3.1 为什么分成 Python 和 .NET 两层
+
+- `Mcp_Server.py`：负责提供 MCP 工具，并把调用转换为网关 HTTP 请求。
+- `.NET`：负责 Skill 管理、参数校验、实际连接数据库或业务系统，以及写操作审批。
+- `skills/*.json`：定义固定业务工具，不需要为每个新接口修改 Python MCP 代码。
+
+对于目前支持的固定 Skill，通常增加或修改 JSON 文件即可，无需重新编译服务。对于新的执行协议或复杂业务行为，仍可能需要改动 C# 代码。
+
+### 3.2 Skill 的两个层次
+
+**业务层（给 AI 看）：**
+
+- Skill 名称。
+- 中文或英文用途说明（`desc`）。
+- 参数的名称、类型、说明。
+- 所属业务域和读写风险。
+
+**执行层（由 .NET 保存）：**
+
+- REST URL 与请求方式。
+- SOAP 地址、SOAPAction 与 XML 模板。
+- SQL 模板与数据库连接别名。
+- PowerShell 脚本及目标环境。
+- 内部系统鉴权配置。
+
+AI 获取 Skill 详情时不会直接收到内部 Token、完整 SQL 模板等执行配置；但执行结果本身仍可能包含业务敏感数据，需要另外控制数据库权限和可返回字段。
+
+### 3.3 Skill 发现是轻量关键词匹配
+
+目前 `GetSkillList` 根据名称、描述、业务域的关键词匹配和简单评分返回结果，**尚不包含向量检索或语义搜索引擎**。
+
+建议把业务关键词、别名、用途写进 `desc`，提高 AI 查找固定 Skill 的成功率。
+
+---
+
+## 4. 项目目录与运行环境
+
+主要目录结构：
+
+```text
+newSources/
+|-- RelayMcp.csproj                # .NET 8 项目
+|-- Program.cs                     # 启动、Swagger、API Key 中间件
+|-- Models.cs                      # Skill 与请求模型
+|-- SkillRegistry.cs               # Skill 加载、搜索、校验与执行
+|-- DbQueryRunner.cs               # SQL 执行、参数化、结果读取
+|-- SqlSafety.cs                   # 临时只读 SQL 预检查
+|-- ApprovalQueue.cs               # 内存审批任务队列
+|-- ApprovalWebSessions.cs         # 网页审批会话和限速
+|-- Controllers/ApprovalPageController.cs # 内置网页审批界面
+|-- ResponseHelper.cs              # API 响应封装
+|-- Controllers/
+|   |-- SkillsController.cs        # /skills
+|   |-- SqlController.cs           # /sql/execute
+|   `-- ApprovalsController.cs     # /approvals
+|-- Mcp_Server.py                  # Python MCP 服务
+|-- approve.ps1                    # 可选命令行审批工具（默认停用）
+|-- appsettings.json               # 服务及连接配置
+|-- Properties/launchSettings.json # Visual Studio 调试启动配置
+|-- skills/
+|   |-- AD.json                    # AD 示例 Skill（默认启用）
+|   `-- test.json                  # REST/SOAP/SQL 示例（默认禁用）
+|-- tests/test_offline.py          # 离线基础测试
+`-- tools/smoke_api.py             # 需要已启动 .NET 的 API 冒烟测试
+```
+
+### 4.1 环境要求
+
+- .NET 8 SDK：编译、启动 ASP.NET Core 服务。
+- Python 3.10 或更新版本：运行 MCP 适配层。
+- Python 依赖：`mcp`、`httpx`。
+- Visual Studio（可选）：用于 F5 调试；也可以使用命令行。
+- Node.js（可选）：仅在使用 MCP Inspector 时需要。
+- PowerShell/AD/Exchange 的对应模块和访问权限：仅使用相关 Skill 时需要。
+- 相应数据库驱动和网络权限：根据使用的数据库与业务系统配置。
+
+项目当前内置以下数据库 Provider：
+
+- SQL Server：`Microsoft.Data.SqlClient`
+- MySQL：`MySqlConnector`
+- SQLite：`Microsoft.Data.Sqlite`
+
+Oracle、达梦等数据库没有在当前代码中注册 Provider，不能直接当成已支持功能。
+
+---
+
+## 5. 安装、配置与启动
+
+### 5.1 解压并准备配置
+
+将项目解压到本机目录，进入含 `RelayMcp.csproj` 的项目根目录。
+
+项目示例配置不包含真实数据库密码或 API Key；请在自己的环境中设置。建议首次运行只连接 SQLite 或其他测试数据库。
+
+**请不要把真实的数据库账号、内部 IP、接口 Token 和审批密钥提交到公开仓库。**
+
+### 5.2 启动 .NET 服务
+
+在 PowerShell 中运行：
+
+```powershell
+cd C:\path\to\newSources
+$env:Relay__ApiKey = '请替换为自己生成的高强度随机密钥'
+dotnet restore
+dotnet run --project RelayMcp.csproj --launch-profile Mcp-Relay.Net
+```
+
+也可以在 Visual Studio 中选择 `Mcp-Relay.Net` 启动配置后按 F5。
+
+默认 HTTP 监听地址：
+
+```text
+http://127.0.0.1:54321
+```
+
+在 `Development` 环境下，项目默认打开：
+
+```text
+http://127.0.0.1:54321/swagger
+```
+
+访问根路径 `/` 会重定向至 `/swagger`。如果在非开发环境打开 `/swagger`，Swagger 不会启用；业务 API 仍然需要身份验证。
+
+### 5.3 在 Swagger 中授权
+
+1. 打开 `/swagger`。
+2. 点击右上角的 `Authorize`（小锁图标）。
+3. 输入 `Relay:ApiKey` 的**原始密钥值**；不要添加 `Bearer` 前缀。
+4. 点击 `Authorize`，再使用 `GET /skills` 等接口调试。
+
+Swagger 页面本身不要求 API Key；实际业务 API 必须携带：
+
+```http
+X-Api-Key: 你的API密钥
+```
+
+若直接打开 `http://127.0.0.1:54321/skills`，没有 Header 时返回 `401` 属于正常行为，不能据此判断服务启动失败。
+
+### 5.4 启动 Python MCP
+
+在另一个 PowerShell 终端中：
+
+```powershell
+cd C:\path\to\newSources
+python -m pip install "mcp>=1.17,<2" httpx
+$env:RELAY_API_KEY = '与.NET端ApiKey完全相同的密钥'
+$env:RELAY_BASE = 'http://127.0.0.1:54321'
+python Mcp_Server.py
+```
+
+Python MCP 端默认使用 `stdio` 通信，通常由 AI 客户端按需启动。直接在终端启动时不一定有可见的交互界面，这属于正常情况。
+
+AI 客户端的 MCP 配置需要指定实际 Python 路径、脚本路径，以及环境变量。例如以下是**示意配置片段**，具体字段依客户端而定：
+
+```json
+{
+  "command": "python",
+  "args": ["C:/path/to/newSources/Mcp_Server.py"],
+  "env": {
+    "RELAY_API_KEY": "与.NET端相同的密钥",
+    "RELAY_BASE": "http://127.0.0.1:54321"
+  }
+}
+```
+
+**不要把 `Relay:ApprovalKey` / `RELAY_APPROVAL_KEY` 放进 AI 客户端的环境变量。** 如果选择 `client` 模式，另需设置 `RELAY_CLIENT_CONFIRM_KEY`（专门用于 MCP 进程向 .NET 证明交互确认完成，详情见第 12 节）。这把密钥也不能放入提示词或 Skill 参数。
+
+---
+
+## 6. 配置文件说明
+
+### 6.1 appsettings.json 示例
+
+下面是结构示例。所有密码、Token、连接字符串都必须换成自己环境中的有效值。
+
+```json
+{
+  "Urls": "http://127.0.0.1:54321",
+  "Relay": {
+    "ApiKey": "",
+    "ApprovalKey": "",
+    "ClientConfirmKey": "",
+    "EnableWrites": false,
+    "ApprovalMode": "web",
+    "ApprovalPublicBaseUrl": "http://127.0.0.1:54321",
+    "ChatApprovalEnabled": false,
+    "EnableLegacyCliApproval": false,
+    "ApprovalTtlMinutes": 5,
+    "HttpTimeoutSeconds": 30
+  },
+  "Tokens": {
+    "BUSINESS_TOKEN": ""
+  },
+  "DatabaseSettings": {
+    "CommandTimeoutSeconds": 30,
+    "MaxRows": 100,
+    "Connections": {
+      "APP_READ_DB": {
+        "Provider": "Microsoft.Data.SqlClient",
+        "ConnectionString": ""
+      },
+      "APP_MYSQL": {
+        "Provider": "MySqlConnector",
+        "ConnectionString": ""
+      },
+      "LOCAL_SQLITE": {
+        "Provider": "Microsoft.Data.Sqlite",
+        "ConnectionString": ""
+      }
+    }
+  },
+  "PowerShellSettings": {
+    "ExchangeServerUrl": "",
+    "Username": "",
+    "Password": ""
+  }
+}
+```
+
+该示例是配置结构演示，项目自带 `appsettings.json` 中的数据库别名可能与示例不同。**Skill 的 `db_alias` 必须与实际 `Connections` 下的别名一致。**
+
+### 6.2 Relay 节点
+
+| 配置项 | 含义 | 默认/建议 |
+|---|---|---|
+| `ApiKey` | MCP / Swagger / HTTP 业务接口使用的 `X-Api-Key` | 必须设置强密钥 |
+| `EnableWrites` | 是否允许写类型 Skill 创建待审批任务 | 默认 `false` |
+| `ApprovalMode` | **三选一**：`client` / `web` / `chat` | 默认 `web` |
+| `ApprovalKey` | 网页审批的独立登录密码；也可供可选命令行审批工具使用 | 仅网页模式必须设置，不能与 ApiKey 相同 |
+| `ClientConfirmKey` | `client` 模式下 MCP 进程独立向 .NET 确认的密钥 | 仅 `client` 模式必须设置 |
+| `ApprovalPublicBaseUrl` | `web` 模式下返回给用户的审批页访问根地址 | 本机示例为 `http://127.0.0.1:54321` |
+| `ChatApprovalEnabled` | 是否允许低安全级别聊天审批 | 默认 `false`，需显式启用 |
+| `EnableLegacyCliApproval` | 是否启用可选的本机命令行审批入口 | 默认 `false` |
+| `ApprovalTtlMinutes` | 待审批任务有效期，1～60 分钟 | 默认 `5` |
+| `HttpTimeoutSeconds` | 下游 REST/SOAP 请求超时，1～300 秒 | 默认 `30` |
+
+**重要说明：**
+
+- `EnableWrites=true` 只允许**提出**写操作，不会绕过审批。
+- `ApprovalMode` 只允许填写 `client`、`web`、`chat`，一次只能选择一种；更换后应重启 .NET 与 Python MCP，并丢弃之前的待审批操作。
+- `ApprovalKey` 和 `ClientConfirmKey` 都不能暴露给 AI 提示词，也不要设置为 `ApiKey` 的相同值。
+- 在 `chat` 模式中，还必须设置 `ChatApprovalEnabled=true`，且单独在对应写 Skill 里配置 `"chat_approval": true`；否则该 Skill 不能执行。
+- 聊天确认**无法证明消息来自真人**，不适合删除、权限提升、重要数据修改等高风险操作。完整对比见第 12 节。
+
+### 6.3 DatabaseSettings 节点
+
+| 配置项 | 含义 |
+|---|---|
+| `Connections` | 使用别名管理数据库连接 |
+| `Provider` | .NET 已注册的数据库 Provider 名称 |
+| `ConnectionString` | 数据库连接字符串 |
+| `CommandTimeoutSeconds` | SQL 命令超时；代码限制 1～300 秒 |
+| `MaxRows` | 单次结果最多返回多少行；代码限制 1～1000，默认 100 |
+
+建议动态 SQL 使用专门的**只读、最小权限数据库账号**。查询与写入最好分别使用不同的数据库别名和权限账户。
+
+### 6.4 Tokens 节点
+
+供 REST/SOAP Skill 引用的内部凭据：
+
+```json
+{
+  "Tokens": {
+    "BUSINESS_TOKEN": ""
+  }
+}
+```
+
+Skill 中写入 `"token_key": "BUSINESS_TOKEN"`，网关会从 `Tokens:BUSINESS_TOKEN` 获取实际值，按 `auth` 类型附加到请求头。
+
+### 6.5 PowerShellSettings 节点
+
+供 `powershell_target: exchange` 使用：
+
+- `ExchangeServerUrl`：远程 Exchange PowerShell 连接地址。
+- `Username`：用于远程会话的账号。
+- `Password`：对应密码。
+
+这组设置不等于通用 WinRM 多主机管理配置；当前远程逻辑是特定的 Exchange 会话连接。
+
+### 6.6 环境变量覆盖配置
+
+ASP.NET Core 支持使用双下划线 `__` 映射配置层级。例如：
+
+```powershell
+$env:Relay__ApiKey = '一段随机密钥'
+$env:DatabaseSettings__Connections__APP_READ_DB__ConnectionString = '你的只读连接串'
+$env:Tokens__BUSINESS_TOKEN = '内部接口Token'
+```
+
+环境变量会覆盖同名的 `appsettings.json` 配置。**如果你修改 JSON 后发现没有生效，先检查系统环境变量。**
+
+---
+
+## 7. Skill 机制与配置规范
+
+### 7.1 文件组织
+
+`skills/` 下的每个 `.json` 文件可以定义多个 Skill：
 
 ```text
 skills/
-├── erp_system.json      # ERP 系统相关接口
-├── legacy_soap.json     # 老式 WebService 接口
-├── hr_database.json     # 人事系统数据库 SQL 模板
-└── ops_scripts.json     # 日常运维脚本接口
+|-- hr.json
+|-- mail.json
+|-- vpn.json
+|-- network.json
+`-- operations.json
 ```
-这种设计的优势在于：
 
-1. 业务隔离，互不干扰：网关启动时会自动扫描并合并整个目录下的所有配置。如果某个系统正在升级或接口需要下线，你只需修改对应的 JSON 文件，甚至直接删掉该文件，完全不会影响其他业务线的正常运行。
+按系统或业务域拆分即可。文件名默认作为 `domain`；也可以在具体 Skill 上配置 `domain`。
 
-2. 极简的多人协作：不同运维人员或开发人员可以各自负责维护自己业务线的 JSON 文件，避免了在同一个大文件中产生代码冲突（Merge Conflict）。
+网关会监听 JSON 文件的创建、修改、删除和重命名，并尝试热加载。若保存过程中 JSON 暂时不合法，运行期间会尽量保留该文件上次成功加载的配置；重启后无法解析的文件则会被跳过。
 
-3. 秒级热加载：得益于底层的 FileSystemWatcher 监听机制，无论你修改或新增哪个文件，网关都能瞬间感知并在内存中完成极速热加载，带来极致的响应体验。
+不同文件不要使用相同的 Skill 名称；重名时只保留先加载的一份并记录警告。
 
+### 7.2 通用字段
 
-## ✨ 核心特性
+| 字段 | 用途 |
+|---|---|
+| JSON 顶层键名 | Skill 的唯一名称，例如 `hr_get_staff` |
+| `desc` | 告诉 AI 何时调用、返回什么信息 |
+| `params` | 参数及类型描述，例如 `"code": "string 员工编号"` |
+| `domain` | 业务域，可选 |
+| `enabled` | 是否启用，默认 `true` |
+| `risk` | `read` 或 `write`，说明操作风险 |
+| `get`、`post`、`put`、`delete` | REST 执行入口，四选一 |
+| `soap` | SOAP 服务地址 |
+| `sql` / `db_alias` | SQL 模板及对应数据库别名 |
+| `script` / `powershell_target` | PowerShell 脚本及执行目标 |
+| `auth` / `token_key` / `header_name` | REST/SOAP 目标系统鉴权配置 |
 
-*   **🚀 配置驱动，动态热加载**：按业务域编写 `.json` 技能配置，支持 `FileSystemWatcher` 热加载。
-*   **🔌 多协议全能转换**：轻松兼容 Java REST、老式 SOAP (支持半自动 XML 拼装)、以及 SQLite / MySQL / SQL Server 数据库。
-*   **🛡️ 企业级安全网关**：外层 `X-Api-Key` 校验，内层隐藏内部真实 Token；数据库写操作（UPDATE/DELETE/EXEC）强制“二次确认”拦截。
-*   **🧠 大模型友好**：内置渐进式发现（List -> Detail -> Execute），并且将底层数据清洗为最纯净的 JSON 格式返回。
+每个 Skill **必须且只能包含一个执行入口**：`get`、`post`、`put`、`delete`、`soap`、`sql`、`script` 中的一个。
 
-# 📚 内部智能体工具网关 (MCP + .NET) 架构备忘录
+`protocol: "powershell"` 可以出现在旧配置中，但当前代码实际上根据 `script` 字段识别 PowerShell；`protocol` 本身不是执行入口。
 
-> **数据流向：** 智能体平台 -> Python MCP (协议翻译) -> .NET 中转服务 (大脑与路由) -> 内部业务系统 (REST/SOAP)
-
-> **核心优势：** 以后无论增加多少内部接口，**Python MCP 代码永远不需要重新发布**，只需要修改 `.NET` 端的 JSON 配置即可。同时实现了安全隔离，智能体接触不到内部系统的真实 Token。
-
----
-
-## 二、 三大核心组件（以后去哪改代码？）
-
-### 1. Python MCP 层（`Mcp_Server.py`）
-
-- **定位**：薄适配层，只负责把 MCP 协议翻译成 HTTP 请求，发给 .NET。
-- **暴露给智能体的 3 个工具**：
-  - `GetSkillList(query, top_k)`：搜索有哪些工具（只返回摘要，防止撑爆上下文）。
-  - `GetSkillDetail(tool_name)`：获取某个工具的参数 Schema 说明。
-  - `ExecuteSkill(tool_name, args)`：执行该工具。
-- **注意**：如果没有特殊需求，**这个文件以后可以封存不用动了**。唯一需要确认的是 `RELAY_TOKEN` 和 `.NET` 的鉴权暗号是否一致。
-
-### 2. .NET 中转层（`RelayMcp` 项目）
-
-- **定位**：真正的执行大脑，负责查表、校验参数、注入 Token 并转发请求。
-- **路由约定**（对应 `SkillsController.cs`）：
-  - `GET /skills` -> 查列表
-  - `GET /skills/{name}` -> 查详情
-  - `POST /skills/execute` -> 执行
-- **鉴权隔离（双重验证）**：
-  - **第一层（MCP -> .NET）**：在 `Program.cs` 中间件里校验 `X-Api-Key`，防止网关被外部随便调用。
-  - **第二层（.NET -> 业务系统）**：在 `appsettings.json` 里存真实 Token，调用时由 `InjectAuthHeaders` 动态附加到请求头。
-
-### 3. 技能注册表（`.json` 文件）
-
-- **定位**：所有接口的“花名册”。
-- **存放位置**：项目根目录的 `skills` 文件夹下（建议按业务域分文件，如 `erp.json`、`oa.json`）。
-- **热加载**：已实现 `FileSystemWatcher`，修改 JSON 文件后，**不用重启 .NET 服务**，系统会自动重新加载。
-
----
-
-## 三、 ⚡ 日常操作：以后怎么加一个新接口？
-
-以后要接入一个新的业务系统接口，**只需要 3 步，全程不用改 C# 和 Python 代码**：
-
-### 第一步：在 `skills/` 目录下找到对应的 JSON（或新建），加一条配置：
-
-````json
-{
-  "新技能的名称_例如_hr_get_user": {
-    "desc": "一句话描述，供大模型搜索时看懂",
-    "params": {
-      "user_id": "string 用户工号",
-      "page": "?int 页码(可选)"
-    },
-    "get": "http://内部hr系统IP/api/users/{user_id}",
-    "auth": "bearer",
-    "token_key": "HR_TOKEN"
-  }
-}
-
-````
-### 第二步：如果是新的业务系统，去 appsettings.json 补 Token：
+### 7.3 参数类型写法
 
 ```json
-"Tokens": {
-  "HR_TOKEN": "eyJhbGciOi...真实的Token"
+{
+  "params": {
+    "employee_code": "string 员工编号",
+    "page": "?int 页码（可选）",
+    "is_active": "?bool 是否只查询有效记录",
+    "amount": "?number 金额"
+  }
 }
+```
 
-````
-### 第三步：去智能体平台/Inspector 测试：
-调一下 GetSkillList 和 ExecuteSkill，测试能否调用成功。
+- 不带 `?`：必填。
+- 带 `?`：可选。
+- 支持 `string`、`integer`/`int`、`number`、`boolean`/`bool`、`array`、`object` 等类型。
+- 未定义的参数会被拒绝；传入类型不匹配会返回参数错误。
+- PowerShell 参数目前只接受基本标量类型，数组和对象并不能直接传入 PowerShell 脚本。
 
+### 7.4 risk 的默认行为
 
-## 🛠️ MCP 调试指南与工具
-调试分为两部分：先测通 .NET，再测通 MCP。
+- REST GET：默认为 `read`。
+- REST POST/PUT/DELETE：默认为 `write`。
+- SOAP：默认为 `write`（即使是查询接口，也因为使用 POST 而保守处理）。
+- PowerShell：默认为 `write`。
+- SQL：由 SQL 预检查判断是否属于只读语句；非只读 SQL 强制按 `write` 处理。
 
-### 1. 调试 .NET 中转服务（使用内置 Swagger）
-工具：浏览器（无需额外安装）。
-启动：按 F5 运行 .NET 项目，保持黑窗口不关。
-访问：浏览器打开
-http://localhost:50000。
-- 操作：
-展开 GET /skills，点击 Try it out，直接点 Execute。看下方是否返回了 JSON 数据（如果返回 []，说明没读到 JSON 文件或搜索词不对）。
-展开 POST /skills/execute，填入 {"tool_name": "erp_get_order", "args": {"order_id": "A123"}} 进行测试。
+如果确认某个 SOAP 查询接口或 PowerShell 查询脚本不会修改系统，可以在**自己审查过的配置**中标为 `"risk": "read"`。
 
-### 2. 调试 Python MCP 服务（使用官方 Inspector）
-官方提供了一个网页版的可视化调试工具，可以模拟智能体调用 MCP。
-前提要求：安装了 Node.js（需要 18+ 版本）。
-启动命令（在 Python 脚本所在目录打开终端）：
-```bash
+**重要：** 对 REST、SOAP、PowerShell，`risk: read` 是配置人员作出的声明，不是程序自动证明该操作真的只读。写错风险标签可能导致操作绕开人工审批。
+
+### 7.5 AI 调用 Skill 的流程
+
+```text
+GetSkillList（根据关键词查找）
+    |
+    v
+GetSkillDetail（获取参数 Schema 和风险信息）
+    |
+    v
+ExecuteSkill（传入名称和参数）
+    |
+    +-- read  --> 执行并返回结果
+    |
+    `-- write --> 检查模式和授权 --> 等待选定的审批方式
+```
+
+建议先让 AI 搜索现成 Skill；没有合适工具时，再根据你提供的业务元数据生成临时只读 SQL。
+
+---
+
+## 8. REST 接口接入
+
+### 8.1 GET 查询接口
+
+文件：`skills/hr.json`
+
+```json
+{
+  "hr_get_staff": {
+    "desc": "根据员工卡号查询员工基本信息",
+    "params": {
+      "staff_code": "string 员工卡号"
+    },
+    "get": "http://127.0.0.1:8080/api/staff/{staff_code}",
+    "risk": "read"
+  }
+}
+```
+
+`{staff_code}` 会作为 URL 参数进行转义后替换。未在 URL 中使用的参数，对于 GET 会追加为查询字符串。
+
+### 8.2 POST 修改接口
+
+文件：`skills/network.json`
+
+```json
+{
+  "network_resend_permission": {
+    "desc": "重新下发指定员工的上网权限；执行前应先确认当前授权有效",
+    "params": {
+      "staff_code": "string 员工卡号"
+    },
+    "post": "http://127.0.0.1:8080/api/network/resend",
+    "risk": "write"
+  }
+}
+```
+
+对于 POST/PUT/DELETE，未被 URL 占位符使用的参数会序列化为 JSON 请求体。网关不负责理解目标接口的业务事务、幂等性和副作用。
+
+### 8.3 REST 鉴权
+
+示例：
+
+```json
+{
+  "hr_get_staff_secure": {
+    "desc": "查询员工基础信息（需要内部系统Token）",
+    "params": {
+      "staff_code": "string 员工卡号"
+    },
+    "get": "http://127.0.0.1:8080/api/staff/{staff_code}",
+    "auth": "bearer",
+    "token_key": "BUSINESS_TOKEN",
+    "risk": "read"
+  }
+}
+```
+
+当前支持：
+
+- `bearer`：`Authorization: Bearer <token>`。
+- `basic`：将 `Tokens` 中的 `账号:密码` 编码为 Basic Authorization。
+- `header`：使用 `header_name` 指定请求头；未设置时默认 `X-Access-Token`。
+
+**注意：** REST 配置使用的是完整 URL。应避免将任意目标 URL 当成用户参数提供给 AI；当前不是通用安全代理，也没有完整的目标地址白名单控制。
+
+---
+
+## 9. SOAP WebService 接入
+
+许多历史系统提供 `.asmx` / SOAP 接口。当前实现使用 `HttpClient` 发送 SOAP XML，不依赖动态生成 WCF 客户端。
+
+### 9.1 方式一：自动组装简单 SOAP 请求
+
+适用于简单的字符串、数字等平铺参数：
+
+```json
+{
+  "mail_get_list_info": {
+    "desc": "查询邮件列表的基本信息",
+    "params": {
+      "list_address": "string 邮件列表地址"
+    },
+    "soap": "http://127.0.0.1:8022/MailService.asmx",
+    "action": "http://tempuri.org/GetMailListInfo",
+    "soap_method": "GetMailListInfo",
+    "soap_namespace": "http://tempuri.org/",
+    "risk": "read"
+  }
+}
+```
+
+网关会构造 SOAP 1.1 Envelope，将参数放进对应方法节点，并对参数文本做 XML 转义。
+
+其中：
+
+- `soap`：服务地址，不要填写 `?wsdl` 查询地址。
+- `action`：HTTP 请求头中的 `SOAPAction`。
+- `soap_method`：SOAP 方法名。
+- `soap_namespace`：方法的 XML 命名空间。
+
+虽然这是一个查询接口，SOAP 底层仍然通过 HTTP POST 发送；因此只有确认其语义只读后才能设置 `risk: read`。
+
+### 9.2 方式二：使用完整 XML 模板
+
+适用于方法参数存在固定层级的复杂 XML 请求：
+
+```json
+{
+  "mail_get_nested_info": {
+    "desc": "通过复杂 SOAP 对象查询邮件组信息",
+    "params": {
+      "list_address": "string 邮件组地址"
+    },
+    "soap": "http://127.0.0.1:8022/MailService.asmx",
+    "action": "http://tempuri.org/GetNestedInfo",
+    "body": "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:tem=\"http://tempuri.org/\"><soapenv:Body><tem:GetNestedInfo><tem:request><tem:ListAddress>{list_address}</tem:ListAddress></tem:request></tem:GetNestedInfo></soapenv:Body></soapenv:Envelope>",
+    "risk": "read"
+  }
+}
+```
+
+`body` 中的占位符会按 XML 文本内容转义替换；**不能通过参数直接注入任意 XML 子树**。复杂数组或需要原样插入 XML 片段的接口，可能需要编写专用适配逻辑。
+
+### 9.3 SOAP 注意事项
+
+- 当前自动封装采用 **SOAP 1.1**，请求类型为 `text/xml`。
+- SOAP 1.2 的 `application/soap+xml` 行为不是当前版本的通用配置能力。
+- 成功响应当前主要以 XML 字符串返回，尚未自动解析成业务对象。
+- 建议先在 Postman/SoapUI 中确认 SOAPAction、命名空间、请求体、返回格式，再写入 Skill。
+- SOAP 修改操作默认应为 `write`；不要通过改成 `read` 绕开审批。
+
+---
+
+## 10. SQL 查询与固定 SQL Skill
+
+这是项目面向个人运维最重要的能力之一：**常用查询通过固定 Skill 复用，临时性问题由 AI 根据已知业务结构生成受控只读 SQL。**
+
+### 10.1 支持的数据库
+
+- SQL Server。
+- MySQL。
+- SQLite。
+
+数据库连接别名配置在 `DatabaseSettings:Connections`。执行时使用别名，不把连接字符串暴露给 MCP 工具调用者。
+
+### 10.2 动态 SQL：ExecuteSql
+
+适用场景：没有现成 Skill 的临时查询。
+
+例如 AI 生成：
+
+```sql
+SELECT employee_code, employee_name
+FROM employee_info
+WHERE department_code = 'D001';
+```
+
+调用 MCP 工具：
+
+```json
+{
+  "db_alias": "APP_READ_DB",
+  "sql": "SELECT employee_code, employee_name FROM employee_info WHERE department_code = 'D001'"
+}
+```
+
+或通过 HTTP：
+
+```http
+POST /sql/execute
+X-Api-Key: 你的API密钥
+Content-Type: application/json
+
+{"dbAlias":"APP_READ_DB","sql":"SELECT 1 AS result"}
+```
+
+**当前动态 SQL 规则：**
+
+- 只允许经过保守预检查的单条 `SELECT` 或 `WITH ... SELECT` 查询。
+- `UPDATE`、`DELETE`、`INSERT`、`EXEC`、`CALL` 等修改/执行语句不能从此入口运行。
+- 查询结果最多返回 `MaxRows` 行，默认 100。
+- 不支持自动导出完整 CSV/Excel。
+- SQL 文本检查不是完整解析器，也不是数据库权限控制的替代品；数据库连接账号必须是只读且最小权限。
+
+### 10.3 固定 SQL Skill
+
+适用于频繁使用、业务条件复杂、经过人工验证的 SQL。
+
+```json
+{
+  "hr_get_staff_by_code": {
+    "desc": "根据员工卡号查询员工姓名和部门",
+    "params": {
+      "staff_code": "string 员工卡号"
+    },
+    "sql": "SELECT employee_code, employee_name, department_name FROM employee_info WHERE employee_code = {staff_code}",
+    "db_alias": "APP_READ_DB",
+    "risk": "read"
+  }
+}
+```
+
+调用示例：
+
+```json
+{
+  "tool_name": "hr_get_staff_by_code",
+  "args": {
+    "staff_code": "10086"
+  }
+}
+```
+
+网关会把 SQL 中的 `{staff_code}` 转换成数据库参数 `@staff_code`，并使用 ADO.NET 参数绑定。**不要在占位符外额外添加单引号**：
+
+```sql
+-- 正确
+WHERE employee_code = {staff_code}
+
+-- 错误：不要在参数外加引号
+WHERE employee_code = '{staff_code}'
+```
+
+SQL 模板仍需人工审查；参数化可以保护参数值，但不能证明查询的业务语义正确，也不保证索引、性能或资源消耗合理。
+
+### 10.4 固定 SQL 写操作
+
+当确实没有业务接口，而必须修改数据库时，应使用**预先定义并审查过的写类型 Skill**，不要让 AI 临时提交任意 UPDATE。
+
+```json
+{
+  "test_update_ticket_status": {
+    "desc": "测试环境：将指定工单改为给定状态，需人工审批",
+    "params": {
+      "ticket_id": "int 工单ID",
+      "status": "string 目标状态"
+    },
+    "sql": "UPDATE support_ticket SET status = {status} WHERE ticket_id = {ticket_id}",
+    "db_alias": "APP_WRITE_DB",
+    "risk": "write",
+    "enabled": false
+  }
+}
+```
+
+这个示例默认禁用；启用前应创建对应的数据库连接、使用最小必要权限、确认业务规则和回滚方式。即使修改只涉及一条表记录，也可能遗漏系统缓存、事件、审计或设备同步等副作用，**优先使用业务系统提供的接口**。
+
+### 10.5 SQL 返回结果类型
+
+常见类型：
+
+- `empty`：没有结果行。
+- `scalar`：一行一列，例如 `COUNT(*)`。
+- `singleRow`：一行多列。
+- `dataset`：多行或被限制截断的数据集，附带 `rowCount` 和 `truncated`。
+- `affectedRows`：部分不返回结果集的数据库操作。
+
+示例（数据集）：
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "type": "dataset",
+    "rowCount": 2,
+    "truncated": false,
+    "data": [
+      {"employee_code": "10001"},
+      {"employee_code": "10002"}
+    ]
+  }
+}
+```
+
+`rowCount` 表示**本次返回的行数**，不代表数据库中所有符合条件的记录数量。`truncated=true` 时，AI 不能把结果误认为完整名单。
+
+### 10.6 业务表结构和 AI 业务知识
+
+目前项目**没有实现自动发现业务表结构并向 AI 提供元数据的 MCP 工具**。
+
+你可以继续采用当前有效的方法：
+
+1. 把重要表、字段、JOIN 关系、业务状态码整理为 Markdown。
+2. 在 AI 客户端的知识文档或提示词中提供给 AI。
+3. 重要且常用的查询固化为 SQL Skill。
+4. 没有匹配 Skill 的临时查询，让 AI 根据已知结构生成只读 SQL。
+5. 对关键业务规则（例如“只查询最新版本记录”），优先通过受控视图或固定模板保障，而不只依靠提示词。
+
+后续可考虑增加数据库结构按需发现，但**本文不把它描述为现有能力**。
+
+---
+
+## 11. PowerShell 运维
+
+当前可通过固定脚本调用 PowerShell，主要面向本机 AD 管理模块和远程 Exchange 管理会话。
+
+### 11.1 本机执行：AD 查询
+
+文件：`skills/ad.json`（示意）
+
+```json
+{
+  "ad_check_user": {
+    "desc": "根据账号名查询 AD 用户启用状态",
+    "params": {
+      "username": "string AD 登录名"
+    },
+    "script": "Get-ADUser -Identity $username -Properties Enabled | Select-Object Name, SamAccountName, Enabled",
+    "powershell_target": "local",
+    "risk": "read"
+  }
+}
+```
+
+使用前提：
+
+- 运行 .NET 的机器具备相应 PowerShell 模块，例如 ActiveDirectory。
+- 运行服务的 Windows 身份具备相应查询权限。
+- 能连接 AD 域服务。
+
+**注意：** 包内 `skills/AD.json` 中的示例默认启用；没有 AD 环境时调用这些 Skill 可能失败。需要时可将其设为 `enabled: false`。
+
+### 11.2 远程执行：Exchange 会话
+
+```json
+{
+  "exchange_check_mailbox": {
+    "desc": "查询 Exchange 邮箱基本信息",
+    "params": {
+      "identity": "string 邮箱地址或身份标识"
+    },
+    "script": "Get-Mailbox -Identity $identity | Select-Object Name, PrimarySmtpAddress, RecipientTypeDetails",
+    "powershell_target": "exchange",
+    "risk": "read"
+  }
+}
+```
+
+`exchange` 模式使用 `PowerShellSettings` 中的 `ExchangeServerUrl`、`Username` 和 `Password` 创建远程 Exchange Runspace。
+
+它不是任意 Windows 服务器的通用远程 PowerShell 工具，也不支持在 Skill 中自由指定目标 WinRM 主机。
+
+### 11.3 参数传递机制
+
+PowerShell Skill 通过脚本变量名接收参数。例如，声明了 `username` 参数时，直接在命令中使用 `$username`：
+
+```powershell
+Get-ADUser -Identity $username
+```
+
+请不要把 `{username}` 当作 PowerShell 脚本中的插值语法，也不要把用户输入拼接成命令文本。
+
+.NET 会创建脚本参数声明，并把传入值作为参数绑定，而不是把字符串直接嵌入命令源代码。
+
+但**参数绑定不代表任意脚本天然安全**。脚本内容必须由可信的运维人员编写、审查，并限制运行账号权限。
+
+### 11.4 PowerShell 的安全建议
+
+- 仅把必要的固定脚本配置为 Skill。
+- 尽量只把 `Get-*` 查询脚本标记为 `read`，同时检查脚本实际调用的命令。
+- 修改组成员、权限、服务状态等操作应标记为 `write` 并人工审批。
+- 不要向 AI 暴露任意脚本执行入口。
+- 不要将高权限密码直接写进 Skill JSON。
+- 失败时先检查 WinRM、Exchange 版本、模块、运行账户和日志，不要反复重试有副作用的脚本。
+
+---
+
+## 12. 写操作审批：三种可选模式
+
+所有写类型 Skill 均先创建一个**待审批操作**，绑定当次 Skill 定义与参数；审批后只执行一次，5 分钟未审批则过期（具体期限可配置）。`ExecuteSql` 临时 SQL 始终只读，不走写审批。
+
+推荐的初始安全配置（默认**禁止写入**）：
+
+```json
+{
+  "Relay": {
+    "ApiKey": "请设置自己的强密钥",
+    "EnableWrites": false,
+    "ApprovalMode": "web",
+    "ApprovalKey": "",
+    "ClientConfirmKey": "",
+    "ApprovalPublicBaseUrl": "http://127.0.0.1:54321",
+    "ChatApprovalEnabled": false,
+    "EnableLegacyCliApproval": false,
+    "ApprovalTtlMinutes": 5,
+    "HttpTimeoutSeconds": 30
+  }
+}
+```
+
+### 12.1 三种模式对比
+
+| 模式 | 如何确认 | 需要什么 | 安全级别与限制 |
+|---|---|---|---|
+| `client` | AI 客户端原生交互表单（MCP Elicitation） | MCP 客户端支持交互，配置专用 `ClientConfirmKey` | 比聊天更可控，但网关仍信任 MCP 客户端/适配进程是否真实向用户展示确认 |
+| `web` | 点击 AI 返回的链接，在极简网页确认/取消 | 配置 `ApprovalKey`，浏览器能访问审批页面 | **推荐**；独立网页登录、会话和 CSRF 校验，与 AI 工具调用隔离 |
+| `chat` | AI 在聊天里询问，用户回复指定确认文字 | 全局开启聊天模式，并逐个 Skill 允许 | **低安全级别**；AI 能看到确认文字，网关不能证明真实用户回复 |
+
+**请不要把这三种模式当成同等强度的授权。** 对于重要写操作，优先使用 `web`；`client` 需要可信 MCP 客户端；`chat` 只适用于你自愿承担风险、并明确允许的低影响操作。
+
+### 12.2 模式一：AI 客户端原生确认（`client`）
+
+.NET 端配置：
+
+```json
+{
+  "Relay": {
+    "EnableWrites": true,
+    "ApprovalMode": "client",
+    "ClientConfirmKey": "请设置随机生成的独立密钥"
+  }
+}
+```
+
+Python MCP 进程需要与 .NET 端一致的**专用**环境变量：
+
+```powershell
+$env:RELAY_API_KEY = '你的 ApiKey'
+$env:RELAY_CLIENT_CONFIRM_KEY = '与 Relay:ClientConfirmKey 相同的独立密钥'
+$env:RELAY_BASE = 'http://127.0.0.1:54321'
+python Mcp_Server.py
+```
+
+如果由 AI 客户端启动 Python MCP，就把 `RELAY_CLIENT_CONFIRM_KEY` 写在该 MCP Server 的**进程环境变量**中，而不是写在对话、提示词或 Skill JSON 中。
+
+使用过程：
+
+1. AI 调用写类型 `ExecuteSkill`；.NET 创建待审批任务。
+2. Python MCP 调用 `ctx.elicit(...)`，客户端显示包含 Skill、目标与参数的确认表单。
+3. 人工明确选择同意且勾选 `confirm=true` 后，Python MCP 使用私有 `X-Client-Confirm-Key` 调用 .NET 确认接口。
+4. .NET 原子化执行一次写操作，并允许 `GetApprovalStatus` 查看结果。
+
+**兼容性限制：** 当前 `Mcp_Server.py` 采用 Python MCP SDK **v1 的 FastMCP** 和传统 `ctx.elicit` 交互请求。安装建议 `mcp>=1.17,<2`。MCP 客户端未声明支持 Elicitation、拒绝、取消或不支持这种交互时，**不会执行写操作**，会返回 `CLIENT_CONFIRM_UNAVAILABLE` / `APPROVAL_DECLINED`。不要误认为任意 MCP 客户端都能弹出按钮。与其他 SDK 主版本或客户端的兼容性需要单独验证。
+
+此外，某些 AI 客户端可能自行处理或自动回答交互请求；因此这一模式不是独立身份认证，使用前务必验证客户端的交互行为。
+
+### 12.3 模式二：内置极简审批网页（`web`，推荐）
+
+.NET 配置：
+
+```json
+{
+  "Relay": {
+    "EnableWrites": true,
+    "ApprovalMode": "web",
+    "ApprovalKey": "一段与ApiKey不同的强密码",
+    "ApprovalPublicBaseUrl": "http://127.0.0.1:54321"
+  }
+}
+```
+
+运行过程：
+
+1. AI 调用写 Skill；.NET 返回 `REQUIRE_APPROVAL`、`approval_id` 和 `approval_url`。
+2. AI 把 `approval_url` 链接显示给你；**不应重复提交相同写 Skill**。
+3. 打开该 URL，例如 `http://127.0.0.1:54321/approve/{approval_id}`。
+4. 首次在网页输入独立 `ApprovalKey` 登录；登录会话最长保留约 30 分钟（内存中），之后通常只需点击确认或取消。
+5. 网页显示已脱敏的操作描述、参数、截止时间，检查无误后点击“确认执行”。
+6. 回到 AI 客户端，使用 `GetApprovalStatus(approval_id)` 查询 `completed`、`failed` 等状态。
+
+网页模式不要求浏览器携带 `X-Api-Key`，而是**单独使用审批登录会话 + SameSite=Lax/HttpOnly Cookie + CSRF 令牌**。审批密钥不会发送给 AI。
+
+**网络要求：** 默认仅面向本机 `127.0.0.1`。从另一台电脑打开审批网页，必须给 .NET 服务配置可用的 HTTPS 地址，`ApprovalPublicBaseUrl` 应填写实际可访问的 HTTPS 根地址；不要把本机 `127.0.0.1` 链接交给远程用户，也不要让网页走明文的跨主机 HTTP。使用反向代理时应正确配置受信任的 HTTPS 转发，不要信任来自公网的伪造转发头。
+
+### 12.4 模式三：直接聊天确认（`chat`，低安全级别）
+
+此模式用于 MCP 部署不支持原生交互，用户也无法便利打开审批网页的场合。
+
+.NET 配置（**必须显式打开**）：
+
+```json
+{
+  "Relay": {
+    "EnableWrites": true,
+    "ApprovalMode": "chat",
+    "ChatApprovalEnabled": true
+  }
+}
+```
+
+对应需要允许聊天审批的低影响写 Skill，额外配置：
+
+```json
+{
+  "demo_resend_notice": {
+    "desc": "测试环境：重新发送通知，仅用于低影响操作",
+    "post": "http://127.0.0.1:8080/api/test/resend-notice",
+    "params": { "request_id": "string 测试请求编号" },
+    "risk": "write",
+    "chat_approval": true
+  }
+}
+```
+
+其他未写 `"chat_approval": true` 的写 Skill **不会**被放行。
+
+聊天过程举例：
+
+```text
+你：帮我重新发送测试通知 10086。
+AI：发现需要执行一个写操作，内容如下：
+    Skill: demo_resend_notice
+    Args: {"request_id":"10086"}
+    请审核；如果同意，请完整回复：确认执行 123456
+你：确认执行 123456
+AI：调用 ConfirmChatApproval(approval_id, "确认执行 123456")。
+网关：检查模式、Skill 允许标记、短语、有效期后执行一次。
+```
+
+这里的六位数字只是示例；实际由 .NET 随机生成，单次任务不同。错误确认最多允许 3 次，之后取消任务。
+
+**安全风险必须理解：** 因为确认短语已经出现在 AI 可见的工具响应中，AI 完全可能**自行调用** `ConfirmChatApproval`。服务端无法知道消息是否真的来自你本人，不能认为这种确认具有安全防护效果。它只是适用于可信个人环境的**操作提醒与防误触流程**。不要给权限提升、删除数据、修改重要生产记录等高风险 Skill 设置 `chat_approval=true`。如果需要可验证的人工批准，请改用 `web` 模式。
+
+### 12.5 模式共通的状态与注意事项
+
+```text
+pending  -> 等待审批
+running  -> 已接受确认，正在执行
+completed -> 执行成功
+failed   -> 执行失败；后端可能已发生部分副作用
+cancelled -> 已取消
+expired  -> 已过期
+```
+
+- 同一个审批 ID **最多执行一次**；执行中的重复确认只返回当前状态，不会自动重试。
+- 待审批任务与结果仅存于 .NET 进程内存，重启服务会丢失。
+- 网关仅记录执行过程状态，不是持久化审计系统。
+- 如果执行中遇到超时或网络异常，请先检查业务系统现状，不要直接重新触发写操作。
+- 项目还提供可选的本机命令行审批工具 `approve.ps1`，需要设置 `EnableLegacyCliApproval=true`，并通过本机 `X-Api-Key` + `X-Approval-Key` 校验；默认关闭。三种常规审批模式均不要求运行该脚本。
+
+---
+
+## 13. MCP 与 HTTP 接口
+
+### 13.1 对 AI 暴露的 6 个 MCP 工具
+
+| MCP 工具 | 作用 |
+|---|---|
+| `GetSkillList(query, top_k)` | 根据关键词检索可用 Skill 摘要 |
+| `GetSkillDetail(tool_name)` | 查询 Skill 参数定义、协议和风险级别 |
+| `ExecuteSkill(tool_name, args)` | 执行已配置 Skill，写操作进入审批流程 |
+| `ExecuteSql(db_alias, sql)` | 运行临时只读 SQL |
+| `GetApprovalStatus(approval_id)` | 查看待审批/已执行任务状态 |
+| `ConfirmChatApproval(approval_id, confirmation)` | **仅聊天审批模式**调用第二步确认；不能独立验证真人来源 |
+
+**当前没有** `GetDatabaseSchema`、`SearchDatabaseSchema`、`ExportCsv` 等工具。
+
+### 13.2 .NET HTTP 接口汇总
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/skills?query=关键字&top_k=8` | 查询 Skill 列表 |
+| GET | `/skills/{name}` | 获取 Skill 详情 |
+| POST | `/skills/execute` | 执行 Skill |
+| POST | `/sql/execute` | 执行只读 SQL |
+| GET | `/approvals/{id}/status` | 查看审批状态 |
+| POST | `/approvals/{id}/confirm-client` | `client` 模式的私有确认入口；需要 `X-Client-Confirm-Key` 和安全传输 |
+| POST | `/approvals/{id}/confirm-chat` | `chat` 模式的低保证确认入口（需显式启用） |
+| GET | `/approve/{id}` | `web` 模式的浏览器审批页面（独立登录） |
+| POST | `/approve/{id}/login` | 浏览器审批登录 |
+| POST | `/approve/{id}/confirm` | 浏览器确认（会话 + CSRF） |
+| POST | `/approve/{id}/cancel` | 浏览器取消（会话 + CSRF） |
+| GET | `/approvals/pending` | 可选本机命令行审批工具查询待处理任务 |
+| POST | `/approvals/{id}/execute` | 可选本机命令行审批执行；需 `EnableLegacyCliApproval=true` |
+| POST | `/approvals/{id}/cancel` | 可选本机命令行审批取消 |
+
+所有 JSON 业务接口均需要 `X-Api-Key`；`confirm-client` 还需要独立 `X-Client-Confirm-Key`，远程访问必须使用 HTTPS。`/approve/{id}` 网页入口不使用业务 API Key，但会独立检查登录会话与 CSRF。命令行审批接口需要 `X-Approval-Key` 和本机回环访问；执行接口默认关闭。
+
+### 13.3 ExecuteSkill 请求示例
+
+```http
+POST /skills/execute
+X-Api-Key: 你的API密钥
+Content-Type: application/json
+
+{
+  "tool_name": "hr_get_staff_by_code",
+  "args": {
+    "staff_code": "10086"
+  }
+}
+```
+
+### 13.4 统一 HTTP 响应结构
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "errorType": null,
+  "data": {}
+}
+```
+
+出现错误时，常见的 `errorType` 包括：
+
+- `PERMISSION_DENIED`：身份验证失败或审批访问条件不满足。
+- `NOT_FOUND`：Skill 或审批任务不存在。
+- `INVALID_PARAMS`：参数缺失或类型不合法。
+- `SECURITY_DENIED`：动态 SQL 不符合只读限制。
+- `WRITE_DISABLED`：写操作未开启、缺少对应模式配置，或聊天 Skill 未单独允许。
+- `REQUIRE_APPROVAL`：已创建待审批写操作，响应带审批模式和后续指引。
+- `CLIENT_CONFIRM_UNAVAILABLE`：当前客户端无法提供 MCP 原生弹窗，未执行写操作。
+- `APPROVAL_DECLINED`：人工取消或明确拒绝客户端原生确认。
+- `BACKEND_ERROR`、`TIMEOUT`：后端错误或超时。
+
+Python MCP 层会进一步将响应整理为 `ok`、`data`、`error_type`、`message`，便于 AI 判断是否继续排查。
+
+---
+
+## 14. 调试与测试
+
+### 14.1 先验证 .NET
+
+启动服务后访问：
+
+```text
+http://127.0.0.1:54321/swagger
+```
+
+点击 `Authorize` 输入 API Key，再依次测试：
+
+1. `GET /skills`：检查 JSON Skill 是否正确加载。
+2. `GET /skills/{name}`：查看参数 Schema 和风险级别。
+3. `POST /sql/execute`：使用测试 SQLite 数据库执行 `SELECT 1 AS result`。
+4. `POST /skills/execute`：验证某个真实存在的只读 Skill。
+
+如果 `GET /skills` 返回空数组，要先确认 Skill 是否被禁用、JSON 是否合法、当前搜索关键词是否匹配。
+
+### 14.2 用命令行验证 API Key
+
+```powershell
+$headers = @{ 'X-Api-Key' = '你的API密钥' }
+Invoke-RestMethod -Uri 'http://127.0.0.1:54321/skills' -Headers $headers
+```
+
+### 14.3 使用 MCP Inspector
+
+安装 Node.js 后，在项目目录运行：
+
+```powershell
+$env:RELAY_API_KEY = '你的API密钥'
+$env:RELAY_BASE = 'http://127.0.0.1:54321'
 npx -y @modelcontextprotocol/inspector python Mcp_Server.py
 ```
-(如果国内下载极慢，先执行 npm config set registry https://registry.npmmirror.com 换源)
-操作步骤：
-运行命令后，浏览器会自动打开 http://localhost:5173 页面。
-点击左侧的 Connect 按钮，等待状态变为绿色的 Connected。
-点击顶部菜单栏的 Tools，即可看到三个工具。
-点击 GetSkillList，在右侧 query 输入框填词（如 order），点击 Execute Tool。
-观察右侧返回的 JSON 结果，看是否和 .NET Swagger 里的结果一致。
 
+在 Inspector 中连接 Python MCP 服务，依次检查 `GetSkillList`、`GetSkillDetail`、`ExecuteSkill`、`ExecuteSql`、`GetApprovalStatus`、`ConfirmChatApproval`。
 
-## 📡 老式 WebService (SOAP) 接入指南
+Inspector 的具体页面和端口可能随版本变化，应以命令行显示的信息为准。
 
-在 .NET 8 中，使用传统的 `ChannelFactory` 动态解析 WSDL 踩坑极多，为了稳定和简单，本网关放弃了纯动态反射，**采用“ HttpClient 发送 XML + 半自动拼装”的策略**。
+### 14.4 离线测试
 
-日常接入新接口时，只需要写 JSON，**不需要写任何 C# 代码**。
-
-### 方案一：半自动拼装（推荐，适用于 80% 的简单接口）
-
-如果你的接口参数都是扁平的（如 string, int），只需配置命名空间和方法名，网关会自动帮你套上 `<soapenv:Envelope>` 外壳。
-
-**JSON 配置示例**（以 `Exchange2013Maillist` 为例）：
-```json
-{
-  "ws_add_maillist": {
-    "desc": "新增邮件列表",
-    "params": {
-      "groupname": "string 组名",
-      "manage": "string 管理员",
-      "password": "string 密码"
-    },
-    "soap": "http://172.16.25.195:8022/Exchange2013Maillist.asmx",
-    "action": "http://Exchange2013Maillist/AddNewMaillist2013",
-    "soap_method": "AddNewMaillist2013",
-    "soap_namespace": "http://Exchange2013Maillist/"
-  }
-}
-```
-- soap：服务地址（注意千万不要带 ?wsdl
-- action：请求头中的 SOAPAction，通常在 WSDL 文件里搜索 soapAction= 就能看到。
-- soap_method / soap_namespace：网关会自动根据这两个字段，结合大模型传入的 params，拼装出完整的 XML 报文。
-
-### 方案二： 全手动写死 XML（兜底，适用于复杂嵌套对象）
-如果某个接口的参数包含了嵌套对象（比如前面提到的 S_MailListMember），半自动拼装会失败。此时需要在 JSON 中直接写死 body 字段。
-```json
-{
-  "ws_add_complex": {
-    "desc": "复杂对象新建邮件列表",
-    "params": {
-      "MailListAddress": "string 邮箱地址",
-      "UserName": "string 用户名"
-    },
-    "soap": "http://172.16.25.195:8022/Exchange2013Maillist.asmx",
-    "action": "http://Exchange2013Maillist/AddNewMaillist",
-    "body": "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:tem=\"http://Exchange2013Maillist/\"><soapenv:Header/><soapenv:Body><tem:AddNewMaillist><tem:smlm><tem:MailListAddress>{MailListAddress}</tem:MailListAddress><tem:UserName>{UserName}</tem:UserName></tem:smlm></tem:AddNewMaillist></soapenv:Body></soapenv:Envelope>"
-  }
-}
-```
-- 注意：XML 里的双引号必须转义为 \"。
-- 用 {参数名} 作为占位符，网关会自动用大模型传入的值进行替换。
-
-### ⚠️ SOAP 接入避坑指南
-- 弃用 WCF 包：请确保项目中没有安装 System.ServiceModel.Http 等包，我们纯靠 HttpClient 发送字符串，不需要那些又老又重的依赖，彻底告别 CS0234 报错。
-- *** SOAP 1.1 vs 1.2：目前的自动拼装代码写死了 SOAP 1.1 的协议头（xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"）。如果对方系统报 415 Unsupported Media Type，说明只支持 SOAP 1.2，需要手动修改 SkillRegistry.cs 里的 ExecuteSoapAsync 方法，将 soapenv 替换为 soap12，并更改对应的 Content-Type。
-- 如何调试 XML：如果接口总是报错，强烈建议用 SoapUI 或 Postman 先调通，把调通的 XML 报文直接复制出来，按方案二配置到 JSON 里，保准能通。
-
-**提示**：
-这段话里的“避坑指南”第 2 点非常有价值，很多老系统的运维人员自己都搞不清是 1.1 还是 1.2，记下来以后能省去大量排查时间。直接复制粘贴即可。
-
-
-### 💡 典型配置示例
-
-为了帮助理解，这里提供两个最常见的 JSON 配置模板。你可以直接把它们复制到你的 `skills/` 目录下进行修改。
-
-#### 示例 1：半自动拼装（适用于简单的平铺参数）
-假设我们有一个通用的用户服务 WebService（`UserService.asmx`），提供了一个 `addUser` 方法，只需要传用户名、邮箱和年龄。网关会自动帮你把它包装成 XML 信封。
-
-```json
-{
-  "ws_add_user": {
-    "desc": "在系统中添加一个新用户",
-    "params": {
-      "userName": "string 登录用户名",
-      "email": "string 用户邮箱地址",
-      "age": "?int 年龄(可选)"
-    },
-    "soap": "http://your-webservice-domain.com/UserService.asmx",
-    "action": "http://tempuri.org/addUser",
-    "soap_method": "addUser",
-    "soap_namespace": "http://tempuri.org/"
-  }
-}
-```
-- 大模型传参：{"userName": "张三", "email": "zhangsan@test.com"}
-- 网关自动生成 XML：
- ```xml
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
-  <soapenv:Header/><soapenv:Body>
-    <tem:addUser>
-      <tem:userName>张三</tem:userName>
-      <tem:email>zhangsan@test.com</tem:email>
-    </tem:addUser>
-  </soapenv:Body>
-</soapenv:Envelope>
- ```
-
-### 示例 2：全手动写死 XML（适用于复杂嵌套对象或数组）
-假设有一个 GroupService.asmx，提供了一个 addGroupWithMembers 方法，要求传入一个组名，以及一个成员数组。因为包含复杂的 XML 嵌套结构，我们必须在 JSON 里把完整的 body 写死。
-```json
-{
-  "ws_add_group": {
-    "desc": "新建一个用户组，并同时指定组内的多个成员",
-    "params": {
-      "groupName": "string 组名称",
-      "admin": "string 管理员账号",
-      "membersXml": "string 成员的XML片段(格式如: <string>a@a.com</string><string>b@b.com</string>)"
-    },
-    "soap": "http://your-webservice-domain.com/GroupService.asmx",
-    "action": "http://tempuri.org/addGroupWithMembers",
-    "body": "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:tem=\"http://tempuri.org/\"><soapenv:Header/><soapenv:Body><tem:addGroupWithMembers><tem:groupName>{groupName}</tem:groupName><tem:admin>{admin}</tem:admin><tem:members>{membersXml}</tem:members></tem:addGroupWithMembers></soapenv:Body></soapenv:Envelope>"
-  }
-}
-```
-- 大模型传参：{"groupName": "技术部", "admin": "admin01", "membersXml": "<string>a@test.com</string><string>b@test.com</string>"}
-- 网关行为：网关会找到 JSON 里的 {groupName} 等占位符，直接替换成真实数据，然后将完整的 body 字符串原封不动地发送给 WebService。
-- 注意：写死 body 时，JSON 字符串内部的 XML 双引号一定要用反斜杠转义（\"）。
-
-
-## 🗄️ 智能体数据库查询与执行 (SQL)
-
-除了调用普通的 HTTP 接口和 WebService，网关还内置了**直连数据库**的超强能力，供智能体查询业务数据或执行受控的修改操作。
-
-### 1. 支持的数据库
-原生基于 ADO.NET 的 `DbProviderFactories` 实现，目前完美支持：
-*   **SQL Server** (`Microsoft.Data.SqlClient`)
-*   **MySQL** (`MySqlConnector`)
-*   **SQLite** (`Microsoft.Data.Sqlite`)
-
-> *(如需接入 Oracle 或国产达梦等，只需在 `Program.cs` 注册对应的 Provider 工厂即可)*
-
-### 2. 安全防线与“二次确认”机制
-由于大模型可能产生幻觉，直接执行 SQL 非常危险，因此网关设计了严格的安全机制：
-1.  **只读放行**：所有的 `SELECT` 和 `WITH` 查询直接放行，并自动截断最多返回 100 行，防止撑爆大模型上下文。
-2.  **危险操作拦截**：`UPDATE`、`DELETE`、`EXEC`（存储过程）等操作，必须在 `appsettings.json` 的 `AllowedOperations` 白名单中配置，且**必须经过二次确认**。
-3.  **确认流程**：
-    *   智能体第一次调用时，不带 `confirm_token`，网关会拦截并返回 `error_type="REQUIRE_CONFIRMATION"`，同时下发一个 5 分钟内有效的一次性 Token。
-    *   智能体会将该 SQL 展示给用户，询问是否确认。
-    *   用户回复“确认”后，智能体带上 Token 第二次调用，网关校验通过后执行，并立即销毁 Token。
-
-### 3. 中转层配置说明 (`appsettings.json`)
-```json
-"DatabaseSettings": {
-  "AllowedOperations": [ "UPDATE", "DELETE", "EXEC" ],
-  "Connections": {
-    "ERP_SQLSERVER": {
-      "Provider": "Microsoft.Data.SqlClient",
-      "ConnectionString": "Server=192.168.1.100;Database=Erp;User Id=sa;Password=123;TrustServerCertificate=True"
-    },
-    "HR_MYSQL": {
-      "Provider": "MySqlConnector",
-      "ConnectionString": "Server=192.168.1.101;Database=Hr;User Id=root;Password=123;"
-    }
-  }
-}
-```
-> 注：Provider 的字符串必须与 Program.cs 中注册的工厂名称严格一致。
-
-### 4. 智能体端 (MCP) 工具说明
-MCP 对外暴露了一个 ExecuteSql 工具，参数如下：
-db_alias：数据库别名（如 "HR_MYSQL"）。
-sql：要执行的 SQL 语句。
-confirm_token：危险操作时的确认凭证（默认不填）。
-
-### 5. SQL 方言避坑指南 (System Prompt 建议)
-由于不同数据库的语法不同，强烈建议在智能体平台的系统提示词中加入以下约束：
-``` text
-"当你调用 ExecuteSql
- 时，请严格遵守目标数据库的语法。例如 MySQL 分页请用 LIMIT，如果是 SQL Server 请用 TOP；
- 如果是查询数量，请注意不同数据库返回字段名的差异。
- 如需执行修改操作，请严格按照工具返回的提示向用户请求确认。"
- ```
-
- ## 🎯 七、 精准制导：配置固定的 SQL 模板查询
-
-除了让智能体自由发挥写 SQL（`ExecuteSql`）之外，在业务场景中，我们更推荐把**写好的、涉及多表关联的复杂 SQL**封装成技能。这样不仅能避免大模型产生幻觉，还能保证查询性能和业务逻辑的绝对准确。
-
-我们复用了现有的 `ExecuteSkill` 工具，底层新增了 `"sql"` 协议。
-
-### 1. 配置说明 (`skills/*.json`)
-
-在 JSON 配置文件中，使用 `"sql"` 指定 SQL 模板，使用 `"db_alias"` 指定目标数据库，使用 `{参数名}` 作为占位符。
-
-**示例：查询指定部门的在职员工（带条件）**
-```json
-{
-  "hr_query_active_users_by_dept": {
-    "desc": "按部门 ID 查询所有在职员工及所属部门名称",
-    "params": {
-      "deptId": "int 部门ID"
-    },
-    "sql": "SELECT u.name, d.dept_name FROM t_user u LEFT JOIN t_dept d ON u.dept_id = d.id WHERE u.status = 1 AND d.id = {deptId}",
-    "db_alias": "HR_MYSQL"
-  }
-}
-```
-示例：获取全表统计（无参数）
-```json
-{
-  "hr_get_user_count": {
-    "desc": "获取全系统用户总数",
-    "sql": "SELECT COUNT(*) as total FROM t_user",
-    "db_alias": "HR_MYSQL"
-  }
-}
-```
-### 2. 底层安全机制：参数化查询防注入
-当你使用 {参数名} 占位符时，.NET 网关底层并不是简单地进行字符串替换。
-在执行前，网关会自动将 {deptId} 转换为 ADO.NET 的参数化查询 @deptId，并为其绑定值。这从根本上杜绝了 SQL 注入的风险。
-
-### 3. 智能体的调用流程
-* 用户问：“帮我查一下技术部（ID 为 5）的员工名单。”
-* 智能体调用 GetSkillList("查询员工")。
-* 发现技能 hr_query_active_users_by_dept。
-* 智能体调用 ExecuteSkill，传入参数：
-```json
-{
-  "tool_name": "hr_query_active_users_by_dept",
-  "args": { "deptId": 5 }
-}
-```
-* 网关执行 SQL，返回标准的 JSON 数据集给大模型进行总结。
-> 提示：对于核心的、经常复用的业务查询，强烈建议采用这种“配置模板”的方式，而不是让大模型通过 ExecuteSql 自行拼装。前者稳定可控，后者灵活但存在风险。
-```text
-复制这段内容放入 README 后，你整个 SQL 模块的介绍就非常完整了：既有给大模型自由探索的“动态执行”，也有保障业务绝对准确的“模板配置”。
-```
-## 🖥️ 八、 Windows 远程运维：PowerShell 执行引擎
-
-在企业内网中，大量的老旧系统（如 Exchange、AD 域控）或 Windows Server 基础运维，最通用的操作方式不是 REST API，而是 **PowerShell**。
-
-为此，Mcp-Relay.Net 内置了 **PowerShell 远程执行引擎**。你**完全不需要**在目标服务器（如 Exchange 服务器）上部署任何网关代码，只需保证网络互通并开启 WinRM，即可通过本网关远程调用 PowerShell 命令。
-
-### 1. 原理与前提条件
-
-*   **通信原理**：网关通过 `WinRM` (Windows Remote Management) 协议建立远程 Runspace 会话，将 JSON 中配置的脚本发送到目标服务器执行，并将返回的 `PSObject` 自动转换为干净的 JSON 返回给智能体。
-*   **目标服务器准备**：必须在目标 Windows 服务器（如 Exchange 2013）上以管理员身份运行 PowerShell 并执行以下命令开启远程管理：
-    ```powershell
-    Enable-PSRemoting -Force
-    ```
-(确保防火墙放行 5985 (HTTP) 或 5986 (HTTPS) 端口)
-###  2. 网关配置 (appsettings.json)
-为了保证凭证安全，远程服务器的地址和账号密码统一存放在网关的 appsettings.json 中：
-```json
-{
-  "PowerShellSettings": {
-    "ExchangeServerUrl": "http://172.16.25.xxx:5985/wsman", 
-    "Username": "your_domain\\administrator",
-    "Password": "your_password"
-  }
-}
-```
-###  3. 技能配置示例 (skills/exchange.json)
-在 JSON 配置文件中，指定 "protocol": "powershell"，并在 "script" 字段中写入固定的 PowerShell 模板。使用 {参数名} 作为动态占位符。
-*   **示例 1：查询 Exchange 用户信息（带参数）**
-```json
-{
-  "exchange_check_user": {
-    "desc": "检查 Exchange 用户是否存在，并返回其基本信息",
-    "params": {
-      "identity": "string 用户账号（如：domain\\zhangsan 或 邮箱地址）"
-    },
-    "protocol": "powershell",
-    "script": "Get-User -Identity '{identity}' | Select-Object Name, DistinguishedName, Enabled"
-  }
-}
-```
-*   **示例 2：查询 Exchange 邮箱权限（多参数）**
-```json
-{
-  "exchange_check_mailbox_permission": {
-    "desc": "检查用户对指定邮箱的完全访问权限",
-    "params": {
-      "identity": "string 目标邮箱",
-      "user": "string 被检查的用户"
-    },
-    "protocol": "powershell",
-    "script": "Get-MailboxPermission -Identity '{identity}' -User '{user}' | Select-Object Identity, User, AccessRights"
-  }
-}
-```
-*   **示例 3：基础服务器磁盘空间查询（跨服务器）**
-
-```json
-{
-  "check_disk_space": {
-    "desc": "查询指定Windows服务器的磁盘空间使用情况",
-    "params": {
-      "server_ip": "string 服务器IP地址"
-    },
-    "protocol": "powershell",
-    "script": "Invoke-Command -ComputerName '{server_ip}' -ScriptBlock { Get-CimInstance Win32_LogicalDisk -Filter \"DriveType=3\" | Select-Object DeviceID, @{Name='FreeGB';Expression={[math]::Round($_.FreeSpace/1GB,2)}}, @{Name='TotalGB';Expression={[math]::Round($_.Size/1GB,2)}} }"
-  }
-}
+```powershell
+python -m pip install pytest
+python -m pytest tests/test_offline.py -q
 ```
 
-###  4. ⚠️ 核心安全规范（极其重要）
-* 仅限白名单模板：绝对不要向智能体暴露可以随意执行任意 PowerShell 代码的通用工具。只能像上述示例一样，把命令写死在 JSON 的 "script" 字段中。
+该测试主要覆盖示例 JSON、PowerShell 参数格式和 Python MCP 请求格式，不等于 .NET 编译或生产联调。
 
-* 强制只读优先：在运维场景，尽量只封装 Get-*（查询）命令。如果需要重启服务或修改配置，请务必结合之前提到的“二次确认”机制。
+### 14.5 API 冒烟测试
 
-* 防范命令注入：在编写 "script" 时，务必用单引号包裹占位符（如 -Identity '{identity}'），底层 C# 代码在执行前会对传入的参数进行转义，防止大模型生成恶意拼接字符串。
+在启动 .NET 前，先为测试 SQLite 连接配置：
 
-* 网关部署位置：将 Mcp-Relay.Net 部署在独立的跳板机或应用服务器上，不要直接部署在核心的 Exchange 或 AD 域控服务器上，降低风险。
+```powershell
+$env:Relay__ApiKey = '你的API密钥'
+$env:DatabaseSettings__Connections__LOCAL_SQLITE__ConnectionString = 'Data Source=:memory:'
+dotnet run --project RelayMcp.csproj --launch-profile Mcp-Relay.Net
+```
+
+另开终端：
+
+```powershell
+$env:RELAY_API_KEY = '同一把API密钥'
+python tools/smoke_api.py
+```
+
+当前冒烟脚本使用 SQLite 的内存数据库，验证简单查询、单列多行、NULL、写 SQL 拒绝等基础行为。
+
+### 14.6 编译与集成测试
+
+首次部署和每次修改代码后，请在自己的开发机编译项目：
+
+```powershell
+dotnet restore
+dotnet build
+```
+
+接着在隔离测试环境中验证 REST、SOAP、SQL、PowerShell Skill 与三种审批模式。实际业务系统、网络、权限和 PowerShell 模块各不相同，仅通过离线测试不能保证所有功能在目标环境下可用。
+
+---
+
+## 15. 常见问题
+
+### 15.1 启动浏览器后显示 401，是否启动失败？
+
+不一定。如果打开的是 `/skills` 等业务接口，没有携带 `X-Api-Key`，返回 401 是预期行为。
+
+使用开发环境的 `/swagger` 页面，在 `Authorize` 中输入 API Key 后再调试接口。
+
+如果 `/swagger` 返回 401，请确认访问地址是 `/swagger` 而不是业务 API，并确认 ASP.NET Core 环境是 `Development`。
+
+### 15.2 为什么 Swagger 没有出现？
+
+Swagger 仅在开发环境启用。确认选择了 `Properties/launchSettings.json` 中的 `Mcp-Relay.Net` 启动配置，或检查 `ASPNETCORE_ENVIRONMENT`。
+
+请不要为了打开 Swagger 而在不受信任的公网环境启用开发模式。
+
+### 15.3 .NET 配了 ApiKey，为什么 MCP 仍然返回 401？
+
+Python MCP 不会自动读取 .NET 的 `appsettings.json`。必须设置与 .NET 端一致的环境变量 `RELAY_API_KEY`。
+
+此外，如果设置了 `Relay__ApiKey` 环境变量，它会覆盖 JSON 中的值。
+
+### 15.4 EnableWrites=false 会影响 SQL 查询吗？
+
+不会。它只控制写类型 Skill 是否可以进入审批流程。临时只读 SQL 和正常的只读 Skill 不需要开启写操作。
+
+### 15.5 为什么某个 SOAP/PowerShell 查询被要求审批？
+
+因为 SOAP 和 PowerShell 默认按写操作处理。确认该 Skill 真正只读后，才可在可信 JSON 配置中声明 `risk: read`。
+
+### 15.6 为什么 SQL Skill 的参数没有生效？
+
+检查：
+
+- Skill 是否配置 `sql` 和正确的 `db_alias`。
+- SQL 是否用 `{参数名}`，且与 `params` 中名称完全一致。
+- 是否错误地把 `{参数名}` 放在了引号中。
+- 数据库连接字符串及权限是否有效。
+
+### 15.7 为什么查到了 100 行就停止？
+
+因为 `DatabaseSettings:MaxRows` 默认是 100，且代码最多允许设置到 1000。当前版本没有完整 CSV/Excel 导出接口。
+
+如果需要完整报表，可先使用业务系统已有导出功能，或者在后续版本增加受控的分批导出机制。
+
+### 15.8 PowerShell 提示命令不存在？
+
+`powershell_target: local` 使用服务本机的 PowerShell 运行环境，需要对应模块。AD 命令需要 ActiveDirectory 模块；Exchange 命令则通常要使用正确的远程 Exchange 环境。
+
+### 15.9 为什么修改了 Skill 没有生效？
+
+先检查 JSON 格式与日志。配置文件无效时，运行中的服务可能继续保留上一次正确的版本。确认修改的是真正运行目录下的 `skills` 文件，而不是另一个解压目录中的副本。
+
+### 15.10 为什么审批列表为空？
+
+可能是：写操作被禁用、请求未成功入队、任务过期、任务已经执行、服务已重启，或查询的不是同一个 .NET 实例。日常查看进度请使用 `GetApprovalStatus`。
+
+### 15.11 为什么客户端没有弹出确认窗口？
+
+`client` 模式依赖 MCP 客户端对 Elicitation 的支持。当前 Python 适配器使用 SDK v1 的 `ctx.elicit`。不支持时只会返回 `CLIENT_CONFIRM_UNAVAILABLE`，**不会自动改用聊天审批，也不会执行写操作**。如客户端不支持，请在 .NET 配置中手动切换为 `web`（推荐）或谨慎选择 `chat`。
+
+### 15.12 为什么点击审批 URL 打不开或返回 403？
+
+本机默认地址 `127.0.0.1` 只对 .NET 所在机器有效。若浏览器位于另一台电脑，请配置可到达的 HTTPS 根地址到 `ApprovalPublicBaseUrl`，并将 .NET 服务绑定在正确的 HTTPS 监听地址。没有独立 `ApprovalKey` 时也无法登录网页。
+
+### 15.13 为什么聊天确认被拒绝？
+
+需要满足 `ApprovalMode=chat`、`ChatApprovalEnabled=true`、该写 Skill 中 `chat_approval=true`，同时确认文字必须与当前审批任务完全一致，且没有过期。聊天模式不能验证真人身份，请只用于低影响操作。
+
+---
+
+## 16. 安全边界与已知限制
+
+### 16.1 已有保护
+
+- API 请求需要 `X-Api-Key`。
+- 默认监听本机 `127.0.0.1:54321`。
+- 数据库连接和内部 Token 由 .NET 端管理，不直接作为 MCP 工具参数提供。
+- 固定 SQL Skill 的值参数使用 ADO.NET 参数绑定。
+- 临时 SQL 有只读关键字预检查、语句数量限制、超时和行数限制。
+- 写类型 Skill 默认禁用，启用后根据 `ApprovalMode` 进入三种审批之一；网页确认使用独立密码与防跨站请求验证。
+- 写任务只能执行一次，支持取消和超时。
+- PowerShell 值参数采用参数绑定，而不是简单文本插值。
+
+### 16.2 仍需由使用者保证的安全条件
+
+1. **数据库权限。** SQL 文本过滤不是完整语法分析，也不能证明数据库函数没有副作用；动态 SQL 必须使用数据库只读账号和最小数据访问权限。
+2. **业务权限。** 能从数据库查到某些数据，不意味着用户有权查看或导出；尤其是员工个人信息、邮箱、审计记录等。
+3. **Skill 审查。** `risk: read` 对 REST/SOAP/PowerShell 是人工声明，错误标记会产生真实风险。
+4. **写操作的业务影响。** 直接修改数据库可能绕开业务校验、缓存更新、异步通知和审计记录；优先使用已有业务 API。
+5. **网络访问。** 当前默认 HTTP 只适合可信本机环境；跨主机部署应自行提供 TLS、访问控制和网络隔离。不要直接暴露到公网。
+6. **审批信任。** 网页审批密码与客户端确认密钥应独立保存。`client` 依赖客户端如实展示确认，`chat` 无法验证真人回复；高风险操作请使用独立网页。
+7. **凭据保护。** 不要把真实密码、内部 URL、Token、企业数据或包含这些内容的日志提交到公开仓库。
+
+### 16.3 当前尚未实现的能力
+
+- 自动获取并搜索业务数据库的完整表结构、主外键及业务语义。
+- 自动维护跨系统员工、账号、设备身份关联。
+- CSV/Excel 大数据量文件导出与下载接口。
+- 持久化的完整调查记录、审计数据库和审批队列。
+- 通用 SOAP 1.2 适配器、SOAP 响应结构化解析。
+- 完整的多用户权限/RBAC、租户隔离、集中管理后台。
+- 通用 PowerShell 多服务器目标管理。
+- 工作流编排或内置大模型 Agent。
+
+以上为规划中的方向，目前尚未提供。
+
+---
+
+## 17. 后续改进方向
+
+坚持“个人助手优先，解决真实工作问题”的原则，建议按如下顺序推进：
+
+**第一阶段：可靠性与安全（优先）**
+
+- 在实际 Windows/.NET 环境编译并联调全部已有 Skill。
+- 为 SQL、REST、SOAP、PowerShell 补齐回归测试。
+- 核查只读数据库权限、审批边界以及重复执行风险。
+- 完善异常信息，避免真实凭据和敏感数据进入日志。
+
+**第二阶段：降低日常配置工作量**
+
+- 按需发现数据库表、字段和关联关系。
+- 保留 Markdown 业务知识，记录业务状态码、关键 JOIN 和查询规则。
+- 改进 Skill 检索与描述质量。
+- 增加可控的 CSV 导出，避免把大量数据塞进 AI 上下文。
+
+**第三阶段：沉淀个人运维经验**
+
+- 允许把已经验证的临时 SQL 转换为 Skill 草稿。
+- 为跨系统调查记录调用过程、证据和验证结果。
+- 逐步积累常见业务问题的知识与操作约束。
+
+暂时不优先投入大型 Web 后台、多智能体、复杂 RAG、通用工作流编辑器等功能。
+
+---
 
 
+## 最后说明
 
+Mcp-Relay.Net 的价值不是提供最多协议，也不是替代现有运维平台，而是让**一个人维护多个传统业务系统**时，能把已有的 SQL、接口和脚本安全、便捷地交给 AI 使用。
+
+当前最重要的目标是：**查得准确、操作可控、出错可追查、配置尽量少。**
+
+项目以实际使用体验为导向，优先把个人运维工作中的查询、排查和可控操作做好。

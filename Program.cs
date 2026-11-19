@@ -3,97 +3,122 @@ using Microsoft.Data.Sqlite;
 using Microsoft.OpenApi.Models;
 using MySqlConnector;
 using System.Data.Common;
+using System.Security.Cryptography;
+using System.Text;
 
-namespace RelayMcp
+namespace RelayMcp;
+
+public class Program
 {
-    public class Program
+    public static void Main(string[] args)
     {
-        public static void Main(string[] args)
+        var builder = WebApplication.CreateBuilder(args);
+        var apiKey = builder.Configuration["Relay:ApiKey"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("è¯·å…ˆè®¾ç½®ç¯å¢ƒå˜é‡ Relay__ApiKeyï¼Œä¸èƒ½ä½¿ç”¨é»˜è®¤/ç¡¬ç¼–ç å‡­æ®ã€‚");
+
+        // Validate the configured approval mode. Credentials remain separate across modes.
+        var approvalMode = (builder.Configuration["Relay:ApprovalMode"] ?? "web").ToLowerInvariant();
+        if (approvalMode is not ("client" or "web" or "chat"))
+            throw new InvalidOperationException("Relay:ApprovalMode åªèƒ½é…ç½® client / web / chat");
+        if (approvalMode == "web")
         {
-            var builder = WebApplication.CreateBuilder(args);
-
-            //×¢²áÈıÖÖÊı¾İ¿âµÄ Provider ¹¤³§
-            DbProviderFactories.RegisterFactory("Microsoft.Data.SqlClient", SqlClientFactory.Instance);
-            DbProviderFactories.RegisterFactory("Microsoft.Data.Sqlite", SqliteFactory.Instance);
-            DbProviderFactories.RegisterFactory("MySqlConnector", MySqlConnectorFactory.Instance);
-
-            // ÔÊĞí¾ÖÓòÍø»òÈİÆ÷·ÃÎÊ£¨
-            builder.WebHost.UseUrls("http://0.0.0.0:54321");
-
-            builder.Services.AddControllers();
-            builder.Services.AddSingleton<SkillRegistry>();
-            builder.Services.AddHttpClient();
-
-            builder.Services.AddEndpointsApiExplorer();
-
-
-            builder.Services.AddSwaggerGen(c =>
-            {
-                // 1. ¶¨Òå¼øÈ¨·½°¸
-                c.AddSecurityDefinition("X-Api-Key", new OpenApiSecurityScheme
-                {
-                    Description = "ÇëÊäÈëÄúµÄ API Key (ÀıÈç: ÄãÉè¶¨µÄÃÜÔ¿)",
-                    Name = "X-Api-Key", // ÇëÇóÍ·Ãû³Æ
-                    In = ParameterLocation.Header, // ·ÅÔÚÇëÇóÍ·Àï
-                    Type = SecuritySchemeType.ApiKey, // ÀàĞÍÊÇ ApiKey
-                    Scheme = "ApiKeyScheme"
-                });
-
-                // 2. ÈÃËùÓĞ½Ó¿ÚÄ¬ÈÏÓ¦ÓÃÕâ¸ö¼øÈ¨·½°¸
-                c.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
-        {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference
-                {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "X-Api-Key"
-                }
-            },
-            new string[] { }
+            var approvalBase = builder.Configuration["Relay:ApprovalPublicBaseUrl"] ?? "http://127.0.0.1:54321";
+            if (!Uri.TryCreate(approvalBase, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+                || (uri.Scheme == Uri.UriSchemeHttp && !uri.IsLoopback)
+                || uri.AbsolutePath != "/"
+                || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+                throw new InvalidOperationException("Relay:ApprovalPublicBaseUrl å¿…é¡»æ˜¯æœ¬æœº HTTP æˆ– HTTPS çš„æ ¹åœ°å€");
         }
-    });
-            });
 
+        DbProviderFactories.RegisterFactory("Microsoft.Data.SqlClient", SqlClientFactory.Instance);
+        DbProviderFactories.RegisterFactory("Microsoft.Data.Sqlite", SqliteFactory.Instance);
+        DbProviderFactories.RegisterFactory("MySqlConnector", MySqlConnectorFactory.Instance);
 
-
-            var app = builder.Build();
-
-            // 1. ÏÈÆôÓÃ Swagger
-            app.UseSwagger();
-            app.UseSwaggerUI(c =>
+        builder.Services.AddControllers();
+        builder.Services.AddSingleton<ApprovalQueue>();
+        builder.Services.AddSingleton<ApprovalWebSessions>();
+        builder.Services.AddSingleton<SkillRegistry>();
+        builder.Services.AddHttpClient();
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen(c =>
+        {
+            c.AddSecurityDefinition("X-Api-Key", new OpenApiSecurityScheme
             {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "RelayMcp API V1");
-                c.RoutePrefix = string.Empty;
+                Description = "Relay__ApiKey ç¯å¢ƒå˜é‡æä¾›çš„ API Key",
+                Name = "X-Api-Key",
+                In = ParameterLocation.Header,
+                Type = SecuritySchemeType.ApiKey
             });
+            c.AddSecurityRequirement(new OpenApiSecurityRequirement
+            {
+                {
+                    new OpenApiSecurityScheme
+                    {
+                        Reference = new OpenApiReference
+                        {
+                            Type = ReferenceType.SecurityScheme, Id = "X-Api-Key"
+                        }
+                    }, Array.Empty<string>()
+                }
+            });
+        });
 
-            // 2. ¼øÈ¨ÖĞ¼ä¼ş£¨Ö»À¹½Ø API ÇëÇó£¬·ÅĞĞ Swagger Ïà¹ØµÄÒ³Ãæ£©
+        var app = builder.Build();
+
+        // Serve the Swagger UI before API authentication in Development only.
+        // Swagger's Authorize button sends X-Api-Key on subsequent API calls.
+        if (app.Environment.IsDevelopment())
+        {
             app.Use(async (context, next) =>
             {
-                // Èç¹ûÊÇ·ÃÎÊ swagger Ò³Ãæ»òÕß json£¬Ö±½Ó·ÅĞĞ
-                if (context.Request.Path.StartsWithSegments("/swagger") ||
-                    context.Request.Path.Value == "/" ||
-                    context.Request.Path.Value?.EndsWith(".js") == true ||
-                    context.Request.Path.Value?.EndsWith(".css") == true)
+                if (HttpMethods.IsGet(context.Request.Method) && context.Request.Path == "/")
                 {
-                    await next();
-                    return;
-                }
-
-                // Ğ£Ñé API Key
-                if (!context.Request.Headers.TryGetValue("X-Api-Key", out var key) || key != "myMcpKey")
-                {
-                    context.Response.StatusCode = 401;
-                    await context.Response.WriteAsJsonAsync(ResponseHelper.Fail("Î´ÊÚÈ¨£¬ÇëÌá¹©ÕıÈ·µÄ X-Api-Key", 401, "PERMISSION_DENIED"));
+                    context.Response.Redirect("/swagger");
                     return;
                 }
                 await next();
             });
-
-            app.MapControllers();
-
-            app.Run();
+            app.UseSwagger();
+            app.UseSwaggerUI();
         }
+
+        // Web approval has its OWN login session and CSRF protection. It never uses
+        // an AI-facing ApiKey, and remote browsers must connect with HTTPS.
+        app.Use(async (context, next) =>
+        {
+            if (approvalMode == "web" && context.Request.Path.StartsWithSegments("/approve"))
+            {
+                var ip = context.Connection.RemoteIpAddress;
+                if (!context.Request.IsHttps && (ip is null || !System.Net.IPAddress.IsLoopback(ip)))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await context.Response.WriteAsync("Remote approvals require HTTPS.");
+                    return;
+                }
+                await next();
+                return;
+            }
+            var supplied = context.Request.Headers["X-Api-Key"].ToString();
+            if (!FixedTimeEquals(supplied, apiKey))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await context.Response.WriteAsJsonAsync(ResponseHelper.Fail("æœªæˆæƒ", 401, "PERMISSION_DENIED"));
+                return;
+            }
+            await next();
+        });
+
+        app.MapControllers();
+        app.Run();
+    }
+
+    internal static bool FixedTimeEquals(string? supplied, string? expected)
+    {
+        if (string.IsNullOrEmpty(supplied) || string.IsNullOrEmpty(expected)) return false;
+        var a = SHA256.HashData(Encoding.UTF8.GetBytes(supplied));
+        var b = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
+        return CryptographicOperations.FixedTimeEquals(a, b);
     }
 }

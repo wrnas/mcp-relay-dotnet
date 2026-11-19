@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace RelayMcp
@@ -68,27 +68,46 @@ namespace RelayMcp
         /// <summary>
         /// 凭证键名。程序启动时会拿这个值去 appsettings.json 的 "Tokens" 节点下读取真实 Token。
         /// </summary>
+        [JsonPropertyName("token_key")]
         public string? TokenKey { get; set; }
 
         /// <summary>
         /// 用于简单 SOAP 接口的半自动拼装：指定要调用的方法名（如 "AddUser"）。
         /// </summary>
+        [JsonPropertyName("soap_method")]
         public string? SoapMethod { get; set; }
 
         /// <summary>
         /// 用于简单 SOAP 接口的半自动拼装：指定命名空间（如 "http://tempuri.org/"）。
         /// </summary>
+        [JsonPropertyName("soap_namespace")]
         public string? SoapNamespace { get; set; }
 
         /// <summary>
         /// 固定的 SQL 模板。底层使用参数化查询防注入（如 "SELECT * FROM Users WHERE id = {id}"）。
         /// </summary>
+        [JsonPropertyName("sql")]
         public string? SqlTemplate { get; set; }
 
         /// <summary>
         /// 目标数据库别名，需与 appsettings.json 中的 DatabaseSettings:Connections 下的键名对应。
         /// </summary>
+        [JsonPropertyName("db_alias")]
         public string? DbAlias { get; set; }
+
+        // 读写风险：read 或 write。未指定时根据协议保守推断。
+        public string? Risk { get; set; }
+
+        // 聊天确认安全级别较低，仅被明确允许的写 Skill 才可使用。
+        [JsonPropertyName("chat_approval")]
+        public bool ChatApproval { get; set; } = false;
+
+        [JsonPropertyName("header_name")]
+        public string? HeaderName { get; set; }
+
+        // local 为本机 PowerShell (需安装相应命令模块)，exchange 为远程 Exchange。
+        [JsonPropertyName("powershell_target")]
+        public string? PowerShellTarget { get; set; }
 
         // 用于接收 JSON 中的 PowerShell 脚本
         public string? Script { get; set; }
@@ -136,6 +155,9 @@ namespace RelayMcp
         /// </summary>
         public bool Enabled { get; set; } = true;
 
+        public bool IsWrite { get; set; }
+        public bool ChatApprovalAllowed { get; set; }
+
         /// <summary>
         /// 将内部实体转化为大模型可见的“技能详情”。
         /// 注意：这里刻意隐藏了 Backend 中的真实 URL、Token 和 SQL 模板，确保安全。
@@ -146,7 +168,8 @@ namespace RelayMcp
             description = Description,
             domain = Domain,
             input_schema = InputSchema,
-            protocol = Backend?.Protocol
+            protocol = Backend?.Protocol,
+            risk = IsWrite ? "write" : "read"
         };
     }
 
@@ -218,6 +241,10 @@ namespace RelayMcp
         /// </summary>
         public string? DbAlias { get; set; }
 
+        public string? PowerShellTarget { get; set; }
+
+        public string? HeaderName { get; set; }
+
         // 用于存储 PowerShell 脚本模板
         public string? ScriptTemplate { get; set; }
 
@@ -267,7 +294,7 @@ namespace RelayMcp
         /// <summary>
         /// 构造一个失败的返回结果。
         /// </summary>
-        public static ExecResult Fail(string errorType, string message, int code)
-            => new(false, null, errorType, message, code);
+        public static ExecResult Fail(string errorType, string message, int code, object? data = null)
+            => new(false, data, errorType, message, code);
     }
 }
