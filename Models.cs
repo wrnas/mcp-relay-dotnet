@@ -107,6 +107,12 @@ namespace RelayMcp
 
         // local 为本机 PowerShell (需安装相应命令模块)，exchange 为远程 Exchange。
         [JsonPropertyName("powershell_target")]
+        public string? LdapServer { get; set; }
+        public string? LdapFilter { get; set; }
+        public List<string>? LdapAttributes { get; set; }
+        public string? LdapScope { get; set; }
+        public string? LdapBaseDn { get; set; }
+
         public string? PowerShellTarget { get; set; }
 
         // 用于接收 JSON 中的 PowerShell 脚本
@@ -240,6 +246,12 @@ namespace RelayMcp
         /// 执行固定 SQL 时使用的目标数据库别名。
         /// </summary>
         public string? DbAlias { get; set; }
+
+        public string? LdapServer { get; set; }
+        public string? LdapFilter { get; set; }
+        public List<string>? LdapAttributes { get; set; }
+        public string? LdapScope { get; set; }
+        public string? LdapBaseDn { get; set; }
 
         public string? PowerShellTarget { get; set; }
 

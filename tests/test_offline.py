@@ -19,7 +19,7 @@ def test_json_files():
         data = json.loads(file.read_text(encoding="utf8"))
         assert all(isinstance(s.get("params"), dict) for s in data.values())
         for skill in data.values():
-            assert sum(k in skill for k in ("get", "post", "put", "delete", "soap", "sql", "script")) == 1
+            assert sum(k in skill for k in ("get", "post", "put", "delete", "soap", "sql", "script", "ldap_filter")) == 1
             assert skill.get("risk") in ("read", "write")
 
 
@@ -46,6 +46,7 @@ def load_mcp_module(monkeypatch):
     mcp_server = types.ModuleType("mcp.server")
     fastmcp = types.ModuleType("mcp.server.fastmcp")
     fastmcp.FastMCP = FakeFastMCP
+    fastmcp.Context = type("Context", (), {})
     monkeypatch.setitem(sys.modules, "mcp", mcp)
     monkeypatch.setitem(sys.modules, "mcp.server", mcp_server)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
@@ -92,7 +93,7 @@ def test_python_mcp_roundtrip(monkeypatch):
     )
     ok = asyncio.run(module.ExecuteSql("LOCAL_SQLITE", "SELECT 1"))
     assert ok == {"ok": True, "data": {"type": "scalar", "data": 1}}
-    pending = asyncio.run(module.ExecuteSkill("do_write", {"name": "abc"}))
+    pending = asyncio.run(module.ExecuteSkill("do_write", object(), {"name": "abc"}))
     assert pending["ok"] is False
     assert pending["error_type"] == "REQUIRE_APPROVAL"
     assert pending["data"] == {"approval_id": "abc"}

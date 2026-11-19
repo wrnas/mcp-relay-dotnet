@@ -18,6 +18,7 @@ public sealed class SkillRegistry : IDisposable
 
     private readonly IConfiguration _config;
     private readonly ApprovalQueue _approvals;
+    private readonly LdapQueryExecutor _ldap;
     private readonly ILogger<SkillRegistry> _logger;
     private readonly string _skillsDir;
     private readonly object _reloadGate = new();
@@ -25,10 +26,11 @@ public sealed class SkillRegistry : IDisposable
     private Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
     private FileSystemWatcher? _watcher;
 
-    public SkillRegistry(IWebHostEnvironment env, IConfiguration config, ApprovalQueue approvals, ILogger<SkillRegistry> logger)
+    public SkillRegistry(IWebHostEnvironment env, IConfiguration config, ApprovalQueue approvals, LdapQueryExecutor ldap, ILogger<SkillRegistry> logger)
     {
         _config = config;
         _approvals = approvals;
+        _ldap = ldap;
         _logger = logger;
         _skillsDir = Path.Combine(env.ContentRootPath, "skills");
         if (!Directory.Exists(_skillsDir))
@@ -142,12 +144,16 @@ public sealed class SkillRegistry : IDisposable
         {
             "rest" => backend.Method != "GET",
             "soap" or "powershell" => true,
+            "ldap" => false,
             "sql" => !SqlSafety.IsReadOnly(backend.SqlTemplate, out _),
             _ => true
         };
         // Dynamic SQL cannot be changed into a read operation just by claiming risk=read.
         var sqlIsWrite = backend.Protocol == "sql" && !SqlSafety.IsReadOnly(backend.SqlTemplate, out _);
         var isWrite = sqlIsWrite || simple.Risk == "write" || (simple.Risk is null && defaultWrite);
+
+        if (backend.Protocol == "ldap" && simple.Risk == "write")
+            throw new FormatException($"{name}: LDAP 第一阶段只支持只读查询，不能配置 risk=write");
 
         if (backend.Protocol == "powershell" && LegacyPsPlaceholder.IsMatch(backend.ScriptTemplate ?? ""))
             throw new FormatException($"{name}: PowerShell 不再支持 {{参数}} 字符串替换，请使用 $参数 变量");
@@ -167,9 +173,16 @@ public sealed class SkillRegistry : IDisposable
 
     private static BackendConfig? BuildBackend(SimpleSkill s)
     {
-        var count = new[] { s.Get, s.Post, s.Put, s.Delete, s.Soap, s.SqlTemplate, s.Script }
+        var count = new[] { s.Get, s.Post, s.Put, s.Delete, s.Soap, s.SqlTemplate, s.Script, s.LdapFilter }
             .Count(x => x != null);
-        if (count != 1) throw new FormatException("必须且只能配置一个执行方式 get/post/put/delete/soap/sql/script");
+        if (count != 1) throw new FormatException("必须且只能配置一个执行方式 get/post/put/delete/soap/sql/script/ldap_filter");
+        if (s.LdapFilter is not null)
+        {
+            LdapQueryExecutor.ValidateSkillTemplate(s.LdapServer, s.LdapFilter, s.LdapAttributes, s.LdapScope, s.LdapBaseDn, s.Params);
+            return new() { Protocol = "ldap", LdapServer = s.LdapServer,
+                LdapFilter = s.LdapFilter, LdapAttributes = s.LdapAttributes,
+                LdapScope = s.LdapScope, LdapBaseDn = s.LdapBaseDn };
+        }
         if (s.Get is not null) return new() { Protocol = "rest", Method = "GET", Url = s.Get };
         if (s.Post is not null) return new() { Protocol = "rest", Method = "POST", Url = s.Post };
         if (s.Put is not null) return new() { Protocol = "rest", Method = "PUT", Url = s.Put };
@@ -346,6 +359,7 @@ public sealed class SkillRegistry : IDisposable
             "rest" => $"REST method={backend.Method}",
             "soap" => $"SOAP method={backend.SoapMethod ?? backend.SoapAction}",
             "powershell" => $"PowerShell target={backend.PowerShellTarget}",
+            "ldap" => $"LDAP server={backend.LdapServer}",
             _ => backend.Protocol ?? "unknown"
         };
         return $"Skill: {skill.ToolName}\nDescription: {skill.Description}\nAction: {action}\nArgs: {JsonSerializer.Serialize(values)}";
@@ -397,6 +411,7 @@ public sealed class SkillRegistry : IDisposable
                 "sql" => await DbQueryRunner.ExecuteAsync(_config, skill.Backend.DbAlias,
                     skill.Backend.SqlTemplate!, args, _logger),
                 "powershell" => await ExecutePowerShellAsync(skill, args),
+                "ldap" => await _ldap.ExecuteAsync(skill.Backend!, args),
                 _ => ExecResult.Fail("BACKEND_ERROR", "不支持的执行协议", 500)
             };
         }

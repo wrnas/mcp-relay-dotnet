@@ -1,0 +1,48 @@
+{
+  "ad_ldap_get_user": {
+    "desc": "按AD登录账号查询用户姓名、邮箱、部门、启用状态与锁定状态（只读）",
+    "domain": "active-directory",
+    "params": { "username": "string sAMAccountName登录账号" },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": ["sAMAccountName", "displayName", "mail", "department", "title", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "pwdLastSet"],
+    "risk": "read"
+  },
+  "ad_ldap_search_users": {
+    "desc": "按姓名片段查询AD用户，返回匹配用户的登录名与邮箱（只读，姓名片段按字面值匹配）",
+    "domain": "active-directory",
+    "params": { "name": "string 用户显示姓名片段" },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(displayName=*{name}*))",
+    "ldap_attributes": ["sAMAccountName", "displayName", "mail", "department"],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_groups": {
+    "desc": "根据登录账号查询AD用户直接所属组的DN（不包含嵌套组或主组）",
+    "domain": "active-directory",
+    "params": { "username": "string AD登录账号" },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_attributes": ["sAMAccountName", "displayName", "memberOf"],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_members": {
+    "desc": "查询指定AD组直接成员的DN（不包含嵌套组展开，特别大的组可能使用AD范围属性返回策略）",
+    "domain": "active-directory",
+    "params": { "groupName": "string AD组CN名称" },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(cn={groupName}))",
+    "ldap_attributes": ["cn", "member"],
+    "risk": "read"
+  },
+  "ad_ldap_check_user_status": {
+    "desc": "查询AD用户是否启用、是否锁定和账户过期原始值（锁定状态依赖域控返回computed属性）",
+    "domain": "active-directory",
+    "params": { "username": "string AD登录账号" },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_attributes": ["sAMAccountName", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "lockoutTime"],
+    "risk": "read"
+  }
+}

@@ -39,6 +39,7 @@ public class Program
         builder.Services.AddControllers();
         builder.Services.AddSingleton<ApprovalQueue>();
         builder.Services.AddSingleton<ApprovalWebSessions>();
+        builder.Services.AddSingleton<LdapQueryExecutor>();
         builder.Services.AddSingleton<SkillRegistry>();
         builder.Services.AddHttpClient();
         builder.Services.AddEndpointsApiExplorer();

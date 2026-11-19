@@ -4,9 +4,9 @@
 
 **技术栈：** .NET 8 / ASP.NET Core Web API / Python 3.10+ / MCP（Model Context Protocol）  
 **项目定位：** 个人运维助手，优先解决传统企业多业务系统的日常运维需求。  
-**核心特点：** 配置驱动、Skill 按需发现、多协议接入、临时只读 SQL、三种可选的写操作审批方式。
+**文档适用版本：** 2026-11-18 三模式审批增量补丁（基于前一版 Swagger 修复工程）。
 
-> 本项目适合个人及小范围可信环境使用，尚不应视为已完成生产安全认证的企业级平台。文档区分当前已支持的功能和未来规划。
+> 本项目目前仍是个人使用阶段的原型，并非已经完成生产安全验证的企业级产品。本文按当前源码描述功能；有些能力仍在规划中，不应视为已实现。
 
 ## 目录
 
@@ -27,6 +27,7 @@
 15. [常见问题](#15-常见问题)
 16. [安全边界与已知限制](#16-安全边界与已知限制)
 17. [后续改进方向](#17-后续改进方向)
+18. [版本迁移与验证说明](#18-版本迁移与验证说明)
 
 ---
 
@@ -177,14 +178,16 @@ newSources/
 |   |-- SqlController.cs           # /sql/execute
 |   `-- ApprovalsController.cs     # /approvals
 |-- Mcp_Server.py                  # Python MCP 服务
-|-- approve.ps1                    # 可选命令行审批工具（默认停用）
+|-- approve.ps1                    # 旧版终端审批（默认禁用）
 |-- appsettings.json               # 服务及连接配置
-|-- Properties/launchSettings.json # Visual Studio 调试启动配置
+|-- Properties/launchSettings.json # VS 开发环境启动配置
 |-- skills/
 |   |-- AD.json                    # AD 示例 Skill（默认启用）
 |   `-- test.json                  # REST/SOAP/SQL 示例（默认禁用）
 |-- tests/test_offline.py          # 离线基础测试
-`-- tools/smoke_api.py             # 需要已启动 .NET 的 API 冒烟测试
+|-- tools/smoke_api.py             # 需要已启动 .NET 的 API 冒烟测试
+|-- CHANGELOG_FIX.md               # 修复及迁移记录
+`-- docs/legacy-readMe.md         # 历史说明，仅供对照
 ```
 
 ### 4.1 环境要求
@@ -213,7 +216,7 @@ Oracle、达梦等数据库没有在当前代码中注册 Provider，不能直�
 
 将项目解压到本机目录，进入含 `RelayMcp.csproj` 的项目根目录。
 
-项目示例配置不包含真实数据库密码或 API Key；请在自己的环境中设置。建议首次运行只连接 SQLite 或其他测试数据库。
+本修复版的 `appsettings.json` 中没有真实数据库密码或 API Key；需要你在自己的环境中配置。建议先只使用 SQLite 或测试数据库验证服务。
 
 **请不要把真实的数据库账号、内部 IP、接口 Token 和审批密钥提交到公开仓库。**
 
@@ -349,11 +352,11 @@ AI 客户端的 MCP 配置需要指定实际 Python 路径、脚本路径，以�
 | `ApiKey` | MCP / Swagger / HTTP 业务接口使用的 `X-Api-Key` | 必须设置强密钥 |
 | `EnableWrites` | 是否允许写类型 Skill 创建待审批任务 | 默认 `false` |
 | `ApprovalMode` | **三选一**：`client` / `web` / `chat` | 默认 `web` |
-| `ApprovalKey` | 网页审批的独立登录密码；也可供可选命令行审批工具使用 | 仅网页模式必须设置，不能与 ApiKey 相同 |
+| `ApprovalKey` | 网页审批的独立登录密码；也供可选的旧版本机脚本使用 | 仅网页模式必须设置，不能与 ApiKey 相同 |
 | `ClientConfirmKey` | `client` 模式下 MCP 进程独立向 .NET 确认的密钥 | 仅 `client` 模式必须设置 |
 | `ApprovalPublicBaseUrl` | `web` 模式下返回给用户的审批页访问根地址 | 本机示例为 `http://127.0.0.1:54321` |
 | `ChatApprovalEnabled` | 是否允许低安全级别聊天审批 | 默认 `false`，需显式启用 |
-| `EnableLegacyCliApproval` | 是否启用可选的本机命令行审批入口 | 默认 `false` |
+| `EnableLegacyCliApproval` | 是否保留旧 `approve.ps1` 的执行入口 | 默认 `false` |
 | `ApprovalTtlMinutes` | 待审批任务有效期，1～60 分钟 | 默认 `5` |
 | `HttpTimeoutSeconds` | 下游 REST/SOAP 请求超时，1～300 秒 | 默认 `30` |
 
@@ -854,13 +857,19 @@ SQL 模板仍需人工审查；参数化可以保护参数值，但不能证明�
 
 ### 11.3 参数传递机制
 
-PowerShell Skill 通过脚本变量名接收参数。例如，声明了 `username` 参数时，直接在命令中使用 `$username`：
+修复版不再支持旧式占位符直接拼接：
 
 ```powershell
-Get-ADUser -Identity $username
+# 旧版（不要继续使用）
+Get-ADUser -Identity '{username}'
 ```
 
-请不要把 `{username}` 当作 PowerShell 脚本中的插值语法，也不要把用户输入拼接成命令文本。
+应改为：
+
+```powershell
+# 修复版
+Get-ADUser -Identity $username
+```
 
 .NET 会创建脚本参数声明，并把传入值作为参数绑定，而不是把字符串直接嵌入命令源代码。
 
@@ -881,7 +890,7 @@ Get-ADUser -Identity $username
 
 所有写类型 Skill 均先创建一个**待审批操作**，绑定当次 Skill 定义与参数；审批后只执行一次，5 分钟未审批则过期（具体期限可配置）。`ExecuteSql` 临时 SQL 始终只读，不走写审批。
 
-推荐的初始安全配置（默认**禁止写入**）：
+默认安全配置（新项目仍然**禁止写入**）：
 
 ```json
 {
@@ -942,7 +951,7 @@ python Mcp_Server.py
 3. 人工明确选择同意且勾选 `confirm=true` 后，Python MCP 使用私有 `X-Client-Confirm-Key` 调用 .NET 确认接口。
 4. .NET 原子化执行一次写操作，并允许 `GetApprovalStatus` 查看结果。
 
-**兼容性限制：** 当前 `Mcp_Server.py` 采用 Python MCP SDK **v1 的 FastMCP** 和传统 `ctx.elicit` 交互请求。安装建议 `mcp>=1.17,<2`。MCP 客户端未声明支持 Elicitation、拒绝、取消或不支持这种交互时，**不会执行写操作**，会返回 `CLIENT_CONFIRM_UNAVAILABLE` / `APPROVAL_DECLINED`。不要误认为任意 MCP 客户端都能弹出按钮。与其他 SDK 主版本或客户端的兼容性需要单独验证。
+**兼容性限制：** 当前 `Mcp_Server.py` 采用 Python MCP SDK **v1 的 FastMCP** 和传统 `ctx.elicit` 交互请求。安装建议 `mcp>=1.17,<2`。MCP 客户端未声明支持 Elicitation、拒绝、取消或不支持这种交互时，**不会执行写操作**，会返回 `CLIENT_CONFIRM_UNAVAILABLE` / `APPROVAL_DECLINED`。不要误认为任意 MCP 客户端都能弹出按钮。MCP Python SDK v2 和新版协议的多轮交互需要另外适配，本补丁没有声称支持。
 
 此外，某些 AI 客户端可能自行处理或自动回答交互请求；因此这一模式不是独立身份认证，使用前务必验证客户端的交互行为。
 
@@ -1038,7 +1047,7 @@ expired  -> 已过期
 - 待审批任务与结果仅存于 .NET 进程内存，重启服务会丢失。
 - 网关仅记录执行过程状态，不是持久化审计系统。
 - 如果执行中遇到超时或网络异常，请先检查业务系统现状，不要直接重新触发写操作。
-- 项目还提供可选的本机命令行审批工具 `approve.ps1`，需要设置 `EnableLegacyCliApproval=true`，并通过本机 `X-Api-Key` + `X-Approval-Key` 校验；默认关闭。三种常规审批模式均不要求运行该脚本。
+- 保留了旧 `approve.ps1` 管理入口作为可选应急功能，必须同时开启 `EnableLegacyCliApproval=true`，并通过本机 `X-Api-Key` + `X-Approval-Key` 验证；默认关闭。日常使用不需要运行该脚本。
 
 ---
 
@@ -1072,11 +1081,11 @@ expired  -> 已过期
 | POST | `/approve/{id}/login` | 浏览器审批登录 |
 | POST | `/approve/{id}/confirm` | 浏览器确认（会话 + CSRF） |
 | POST | `/approve/{id}/cancel` | 浏览器取消（会话 + CSRF） |
-| GET | `/approvals/pending` | 可选本机命令行审批工具查询待处理任务 |
-| POST | `/approvals/{id}/execute` | 可选本机命令行审批执行；需 `EnableLegacyCliApproval=true` |
-| POST | `/approvals/{id}/cancel` | 可选本机命令行审批取消 |
+| GET | `/approvals/pending` | 旧版本机审批管理员查看待处理任务 |
+| POST | `/approvals/{id}/execute` | 旧版本机管理员执行；需 `EnableLegacyCliApproval=true` |
+| POST | `/approvals/{id}/cancel` | 旧版本机管理员取消 |
 
-所有 JSON 业务接口均需要 `X-Api-Key`；`confirm-client` 还需要独立 `X-Client-Confirm-Key`，远程访问必须使用 HTTPS。`/approve/{id}` 网页入口不使用业务 API Key，但会独立检查登录会话与 CSRF。命令行审批接口需要 `X-Approval-Key` 和本机回环访问；执行接口默认关闭。
+所有 JSON 业务接口均需要 `X-Api-Key`；`confirm-client` 还需要独立 `X-Client-Confirm-Key`，远程访问必须使用 HTTPS。`/approve/{id}` 网页入口不使用业务 API Key，但会独立检查登录会话与 CSRF。旧版管理员接口需要 `X-Approval-Key` 和本机回环访问；旧版执行接口默认关闭。
 
 ### 13.3 ExecuteSkill 请求示例
 
@@ -1167,7 +1176,7 @@ python -m pip install pytest
 python -m pytest tests/test_offline.py -q
 ```
 
-该测试主要覆盖示例 JSON、PowerShell 参数格式和 Python MCP 请求格式，不等于 .NET 编译或生产联调。
+该测试主要覆盖示例 JSON、PowerShell 占位符迁移和 Python MCP 请求格式，不等于 .NET 编译或生产联调。
 
 ### 14.5 API 冒烟测试
 
@@ -1188,16 +1197,18 @@ python tools/smoke_api.py
 
 当前冒烟脚本使用 SQLite 的内存数据库，验证简单查询、单列多行、NULL、写 SQL 拒绝等基础行为。
 
-### 14.6 编译与集成测试
+### 14.6 编译与测试的现实限制
 
-首次部署和每次修改代码后，请在自己的开发机编译项目：
+当前文档对应的修复包曾通过 JSON 解析、Python 语法和离线测试检查，但**制作环境没有 .NET SDK，未完成 .NET 编译、真实数据库连接和 AD/Exchange 联调**。
+
+正式使用前，需要在自己的开发机执行：
 
 ```powershell
 dotnet restore
 dotnet build
 ```
 
-接着在隔离测试环境中验证 REST、SOAP、SQL、PowerShell Skill 与三种审批模式。实际业务系统、网络、权限和 PowerShell 模块各不相同，仅通过离线测试不能保证所有功能在目标环境下可用。
+然后在隔离测试环境中验证自己的 REST/SOAP/SQL/PowerShell Skill。
 
 ---
 
@@ -1209,7 +1220,7 @@ dotnet build
 
 使用开发环境的 `/swagger` 页面，在 `Authorize` 中输入 API Key 后再调试接口。
 
-如果 `/swagger` 返回 401，请确认访问地址是 `/swagger` 而不是业务 API，并确认 ASP.NET Core 环境是 `Development`。
+如果 `/swagger` 仍返回 401，确认运行的是包含 Swagger 修复的版本，并且 ASP.NET Core 环境是 `Development`。
 
 ### 15.2 为什么 Swagger 没有出现？
 
@@ -1256,7 +1267,7 @@ Python MCP 不会自动读取 .NET 的 `appsettings.json`。必须设置与 .NET
 
 ### 15.10 为什么审批列表为空？
 
-可能是：写操作被禁用、请求未成功入队、任务过期、任务已经执行、服务已重启，或查询的不是同一个 .NET 实例。日常查看进度请使用 `GetApprovalStatus`。
+可能是：写操作被禁用、请求未成功入队、任务过期、任务已经执行、服务已重启，或查询的不是同一个 .NET 实例。新版本建议直接查看 `GetApprovalStatus`；不再需要为了日常审批使用旧的列表命令。
 
 ### 15.11 为什么客户端没有弹出确认窗口？
 
@@ -1283,7 +1294,7 @@ Python MCP 不会自动读取 .NET 的 `appsettings.json`。必须设置与 .NET
 - 临时 SQL 有只读关键字预检查、语句数量限制、超时和行数限制。
 - 写类型 Skill 默认禁用，启用后根据 `ApprovalMode` 进入三种审批之一；网页确认使用独立密码与防跨站请求验证。
 - 写任务只能执行一次，支持取消和超时。
-- PowerShell 值参数采用参数绑定，而不是简单文本插值。
+- PowerShell 值参数不再使用简单文本插值。
 
 ### 16.2 仍需由使用者保证的安全条件
 
@@ -1306,7 +1317,7 @@ Python MCP 不会自动读取 .NET 的 `appsettings.json`。必须设置与 .NET
 - 通用 PowerShell 多服务器目标管理。
 - 工作流编排或内置大模型 Agent。
 
-以上为规划中的方向，目前尚未提供。
+这些属于未来可能扩展的方向，不应被理解为已包含在当前修复版源码中。
 
 ---
 
@@ -1338,6 +1349,22 @@ Python MCP 不会自动读取 .NET 的 `appsettings.json`。必须设置与 .NET
 
 ---
 
+## 18. 版本迁移与验证说明
+
+如果你从旧 README 对应的原版项目升级，需要注意以下变化：
+
+1. **API Key**：不再使用旧的硬编码认证值；必须配置 `Relay:ApiKey` 或 `Relay__ApiKey`。
+2. **Swagger**：开发环境访问 `/swagger`，通过 `Authorize` 设置 `X-Api-Key`。
+3. **MCP**：Python MCP 使用环境变量 `RELAY_API_KEY`，并对外提供 6 个工具（新增 `ConfirmChatApproval`）。
+4. **临时 SQL**：只允许查询，已移除 `confirm_token` 和旧 `AllowedOperations` 的修改机制。
+5. **写操作**：只能通过固定写 Skill 提出请求，并由配置指定的 `client` / `web` / `chat` 模式确认；默认 `web` 且写入关闭。
+6. **PowerShell 参数**：旧 `{username}` 形式需要改成 `$username` 形式。
+7. **SQL JSON 字段**：修复版支持 `sql`、`db_alias`、`soap_method`、`soap_namespace`、`token_key` 等字段映射。
+8. **示例凭据**：修复包移除了原有示例密码和内部地址，迁移时必须重新配置。
+9. **热加载**：增加了无效 JSON 配置的保留策略，但重启后无效文件仍会被跳过。
+10. **审批改动**：新增 `ApprovalMode`、网页审批、客户端弹窗和聊天确认；原 `approve.ps1` 的执行入口默认禁用。升级后请检查新配置与 Python MCP 的依赖版本。
+
+详细修复记录见 `CHANGELOG_FIX.md`；旧的详细使用文档保留在 `docs/legacy-readMe.md`，但其中某些安全流程和配置字段已失效。
 
 ## 最后说明
 
@@ -1345,4 +1372,84 @@ Mcp-Relay.Net 的价值不是提供最多协议，也不是替代现有运维平
 
 当前最重要的目标是：**查得准确、操作可控、出错可追查、配置尽量少。**
 
-项目以实际使用体验为导向，优先把个人运维工作中的查询、排查和可控操作做好。
+如果在真实工作中证明这些能力可靠、有用，再考虑扩展成适合其他运维人员使用的开源工具。
+
+---
+
+## AD 域服务查询（LDAP/LDAPS）
+
+Mcp-Relay.Net 可通过 **LDAPS** 使用非域计算机上的独立查询账号连接 Windows Active Directory。它作为现有 Skill 的执行方式之一，不需要在域控上安装网关，也不依赖 Exchange 的 PowerShell 连接。
+
+**当前能力**：按登录名查询用户、按姓名搜索、查询用户直接所属组、查询组的直接成员、查询账号启用/锁定状态。全部为**只读操作**，暂不提供 AD 创建账号、修改属性、解锁或加减组；这些不应使用通用 LDAP 查询接口来实现。
+
+### 安装和准备
+
+1. 将 `LdapQueryExecutor.cs` 和其他补丁文件放入对应目录，项目 NuGet 依赖 `System.DirectoryServices.Protocols` 8.0.0。
+2. 在域控制器上准备可用的 LDAPS（TCP 636）与受信任的服务器证书，确保网关能够解析证书上的主机名，并信任签发 CA。**不要关闭证书校验**。
+3. 创建只具有必要目录读取权限的服务账号。非域场景示例使用 LDAPS + LDAP Simple Bind，账号建议填写 UPN（例如 `svc_relay@example.local`），不是域控管理员账号。
+4. 把补丁里的 `AD-config.example.json` 中 `ActiveDirectory` 节点合并进你现有的 `appsettings.json`（**不要覆盖原来的 appsettings.json**），修改 Host、BaseDn、Username、AllowedAttributes。
+5. 在运行 .NET 进程的环境中设置 `MCP_AD_PASSWORD` 密码变量，重启进程让新环境变量生效；切勿把密码写进 Skill 文件或提交到 Git。
+6. 把 `skills/ad_ldap.json` 复制进 `skills/` 目录；启用 `ActiveDirectory:Enabled=true`，启动服务并在 Swagger 中调用 `/skills/execute`。
+
+配置片段：
+
+```json
+{
+  "ActiveDirectory": {
+    "Enabled": true,
+    "Servers": {
+      "CORP_AD": {
+        "Host": "dc01.example.local",
+        "Port": 636,
+        "UseSsl": true,
+        "AuthType": "Basic",
+        "Username": "svc_relay@example.local",
+        "PasswordEnv": "MCP_AD_PASSWORD",
+        "BaseDn": "DC=example,DC=local",
+        "TimeoutSeconds": 15,
+        "MaxResults": 100,
+        "AllowedAttributes": ["cn", "sAMAccountName", "displayName", "mail", "department", "title", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "pwdLastSet", "lockoutTime", "memberOf", "member"]
+      }
+    }
+  }
+}
+```
+
+PowerShell（仅当前终端进程及从此终端启动的子进程可见）：
+
+```powershell
+$env:MCP_AD_PASSWORD = '这里填AD查询账号的密码'
+# 然后在同一个终端启动 dotnet run
+```
+
+Visual Studio 直接 F5 启动时，不会自动读取另一个 PowerShell 窗口临时设置的变量；需在实际启动进程的环境里设置。生产环境建议用系统凭据管理方案。
+
+### Skill 配置与调用
+
+LDAP Skill 使用 `ldap_server`、`ldap_filter`、`ldap_attributes`、可选 `ldap_scope`（`base`、`one`、`sub`）、可选 `ldap_base_dn`。查询过滤器中的 `{username}` 等占位符会被网关按 LDAP 过滤器语法转义，而不是直接拼接输入。`ldap_base_dn` 必须处于该服务器配置的 `BaseDn` 范围内；属性必须位于 `AllowedAttributes` 白名单。
+
+```json
+{
+  "tool_name": "ad_ldap_get_user",
+  "args": { "username": "zhangsan" }
+}
+```
+
+通过 Swagger 的 `GET /skills`、`GET /skills/ad_ldap_get_user` 或 `POST /skills/execute` 测试；实际接口请求仍需在 Swagger `Authorize` 中填写 `X-Api-Key`。
+
+### 返回字段与限制
+
+- `enabled`：基于 `userAccountControl` 中的禁用位推导。
+- `locked`：仅当域控返回 `msDS-User-Account-Control-Computed` 时才会返回；没有该属性时**不能认定用户未锁定**。
+- `pwdLastSetUtc`、`accountExpiresUtc`、`lockoutTimeUtc`：在有效 FILETIME 情况下附带 UTC 字符串；原始目录属性仍保留。
+- `memberOf` 和 `member` 返回直接成员关系，不展开嵌套组，且 `memberOf` 不表示用户的主组；AD 超大组的范围属性可能需要额外支持。
+- 查询使用分页并限制最大返回对象数，`limit_reached=true` 只表示达到了本次上限，**不表示取得了全部对象**。
+- 当前为仅查询执行器，没有通用 LDAP 自由搜索入口、任意 LDAP 写入或凭据输出。
+
+### 常见连接问题
+
+- `LDAP_CONFIG`：确认 `ActiveDirectory:Enabled`、服务器配置、环境变量密码、Skill 属性白名单。
+- `LDAP_ERROR`：依次检查域控 DNS、TCP 636、证书信任链、账号 UPN/密码、账号查询权限。
+- `NOT_FOUND` 或空 `entries`：先核对查询账号、BaseDn 和筛选器，再确认目录中是否存在对应对象。
+
+**说明**：此模块基于 Windows Server 2012 AD 的常见 LDAP 行为设计。当前交付没有生产 AD 环境可用，需在测试域或只读账号下实际验证证书、身份认证以及用户/组结果。
