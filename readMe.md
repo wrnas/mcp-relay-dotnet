@@ -1216,19 +1216,6 @@ python tools/smoke_api.py
 
 当前冒烟脚本使用 SQLite 的内存数据库，验证简单查询、单列多行、NULL、写 SQL 拒绝等基础行为。
 
-### 14.6 编译与测试的现实限制
-
-当前文档对应的修复包曾通过 JSON 解析、Python 语法和离线测试检查，但**制作环境没有 .NET SDK，未完成 .NET 编译、真实数据库连接和 AD/Exchange 联调**。
-
-正式使用前，需要在自己的开发机执行：
-
-```powershell
-dotnet restore
-dotnet build
-```
-
-然后在隔离测试环境中验证自己的 REST/SOAP/SQL/PowerShell Skill。
-
 ---
 
 ## 15. 常见问题
