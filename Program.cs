@@ -1,3 +1,4 @@
+using ModelContextProtocol.AspNetCore;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Microsoft.OpenApi.Models;
@@ -61,6 +62,17 @@ public class Program
         builder.Services.AddSingleton<LdapMutationExecutor>();
         builder.Services.AddSingleton<SkillRegistry>();
         builder.Services.AddHttpClient();
+
+        // Native MCP HTTP endpoint. Disabled only when explicitly configured as false.
+        // Existing REST/Swagger endpoints and SkillRegistry remain unchanged.
+        var mcpEnabled = builder.Configuration.GetValue("Mcp:Enabled", true);
+        if (mcpEnabled)
+        {
+            builder.Services.AddMcpServer()
+                .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
+                .WithTools<McpTools>();
+        }
+
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen(c =>
         {
@@ -137,6 +149,12 @@ public class Program
         });
 
         app.MapControllers();
+        if (mcpEnabled)
+        {
+            // The existing X-Api-Key middleware also protects /mcp.
+            app.MapMcp("/mcp");
+            app.Logger.LogInformation("MCP Streamable HTTP available at /mcp");
+        }
         app.Run();
     }
 
