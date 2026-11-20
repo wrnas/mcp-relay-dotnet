@@ -1380,49 +1380,7 @@ Mcp-Relay.Net 的价值不是提供最多协议，也不是替代现有运维平
 
 Mcp-Relay.Net 可通过 **LDAPS** 使用非域计算机上的独立查询账号连接 Windows Active Directory。它作为现有 Skill 的执行方式之一，不需要在域控上安装网关，也不依赖 Exchange 的 PowerShell 连接。
 
-**当前能力**：按登录名查询用户、按姓名搜索、查询用户直接所属组、查询组的直接成员、查询账号启用/锁定状态。全部为**只读操作**，暂不提供 AD 创建账号、修改属性、解锁或加减组；这些不应使用通用 LDAP 查询接口来实现。
-
-### 安装和准备
-
-1. 将 `LdapQueryExecutor.cs` 和其他补丁文件放入对应目录，项目 NuGet 依赖 `System.DirectoryServices.Protocols` 8.0.0。
-2. 在域控制器上准备可用的 LDAPS（TCP 636）与受信任的服务器证书，确保网关能够解析证书上的主机名，并信任签发 CA。**不要关闭证书校验**。
-3. 创建只具有必要目录读取权限的服务账号。非域场景示例使用 LDAPS + LDAP Simple Bind，账号建议填写 UPN（例如 `svc_relay@example.local`），不是域控管理员账号。
-4. 把补丁里的 `AD-config.example.json` 中 `ActiveDirectory` 节点合并进你现有的 `appsettings.json`（**不要覆盖原来的 appsettings.json**），修改 Host、BaseDn、Username。可按需要通过 DeniedAttributes 追加禁止读取的自定义属性。
-5. 在运行 .NET 进程的环境中设置 `MCP_AD_PASSWORD` 密码变量，重启进程让新环境变量生效；切勿把密码写进 Skill 文件或提交到 Git。
-6. 把 `skills/ad_ldap.json` 复制进 `skills/` 目录；启用 `ActiveDirectory:Enabled=true`，启动服务并在 Swagger 中调用 `/skills/execute`。
-
-配置片段：
-
-```json
-{
-  "ActiveDirectory": {
-    "Enabled": true,
-    "Servers": {
-      "CORP_AD": {
-        "Host": "dc01.example.local",
-        "Port": 636,
-        "UseSsl": true,
-        "AuthType": "Basic",
-        "Username": "svc_relay@example.local",
-        "PasswordEnv": "MCP_AD_PASSWORD",
-        "BaseDn": "DC=example,DC=local",
-        "TimeoutSeconds": 15,
-        "MaxResults": 100,
-        "DeniedAttributes": []
-      }
-    }
-  }
-}
-```
-
-PowerShell（仅当前终端进程及从此终端启动的子进程可见）：
-
-```powershell
-$env:MCP_AD_PASSWORD = '这里填AD查询账号的密码'
-# 然后在同一个终端启动 dotnet run
-```
-
-Visual Studio 直接 F5 启动时，不会自动读取另一个 PowerShell 窗口临时设置的变量；需在实际启动进程的环境里设置。生产环境建议用系统凭据管理方案。
+详情请参考：README_AD_Config.md
 
 ### Skill 配置与调用
 

@@ -14,19 +14,6 @@ public sealed class LdapQueryExecutor
 {
     private static readonly Regex ParamRef = new(@"\{([A-Za-z_][A-Za-z0-9_]*)\}", RegexOptions.Compiled);
     private static readonly Regex AttributeName = new(@"^[a-zA-Z][a-zA-Z0-9-]*$", RegexOptions.Compiled);
-    // 安全兜底：这些属性包含账号凭据、LAPS 密码、BitLocker 恢复密钥等。
-    // 无论 appsettings.json 怎样配置，都不能通过此只读 LDAP 执行器返回。
-    // 其他企业自定义敏感属性，可通过 ActiveDirectory:Servers:<别名>:DeniedAttributes 追加。
-    private static readonly HashSet<string> BuiltInDeniedAttributes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "unicodePwd", "userPassword", "dBCSPwd", "lmPwdHistory", "ntPwdHistory",
-        "supplementalCredentials", "pekList",
-        "msDS-ManagedPassword", "ms-Mcs-AdmPwd",
-        "msLAPS-Password", "msLAPS-EncryptedPassword", "msLAPS-EncryptedPasswordHistory",
-        "msLAPS-EncryptedDSRMPassword", "msLAPS-EncryptedDSRMPasswordHistory",
-        "msFVE-RecoveryPassword", "msFVE-KeyPackage", "nTSecurityDescriptor"
-    };
-
     private readonly IConfiguration _settings;
     private readonly ILogger<LdapQueryExecutor> _logger;
 
@@ -106,22 +93,6 @@ public sealed class LdapQueryExecutor
             !string.Equals(section["AuthType"], "Basic", StringComparison.OrdinalIgnoreCase))
             return ExecResult.Fail("LDAP_CONFIG", "当前非域 LDAP 连接仅支持 LDAPS + Basic Bind（UPN/DN 账号）", 500);
 
-        // 不再强制要求维护 AllowedAttributes。每个 Skill 的 ldap_attributes 仍明确列出
-        // 本次需要读取的字段；内置敏感属性黑名单始终生效，用户可通过 DeniedAttributes 追加。
-        // 旧的 AllowedAttributes 配置可以安全删除，不会影响其他 Skill。
-        var denied = new HashSet<string>(BuiltInDeniedAttributes, StringComparer.OrdinalIgnoreCase);
-        var configuredDenied = section.GetSection("DeniedAttributes").Get<string[]>() ?? Array.Empty<string>();
-        foreach (var attribute in configuredDenied)
-        {
-            if (string.IsNullOrWhiteSpace(attribute) || !AttributeName.IsMatch(attribute))
-                return ExecResult.Fail("LDAP_CONFIG", $"ActiveDirectory:Servers:{alias}:DeniedAttributes 存在无效属性名", 500);
-            denied.Add(attribute);
-        }
-        var blocked = skill.LdapAttributes?.Where(denied.Contains).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
-            ?? Array.Empty<string>();
-        if (blocked.Length > 0)
-            return ExecResult.Fail("LDAP_DENIED_ATTRIBUTE", $"LDAP Skill 包含禁止读取的 AD 属性：{string.Join(", ", blocked)}", 403);
-
         var queryDn = skill.LdapBaseDn ?? baseDn;
         if (!DnWithinBase(queryDn, baseDn))
             return ExecResult.Fail("LDAP_CONFIG", "Skill 的 ldap_base_dn 超出服务器允许的 BaseDn", 403);
@@ -149,7 +120,7 @@ public sealed class LdapQueryExecutor
             // System.DirectoryServices.Protocols executes synchronously. Keep it off the request thread.
             var result = await Task.Run(() => Search(host, section.GetValue("Port", 636), user,
                 password, queryDn, filter, scope, skill.LdapAttributes!, limit, seconds,
-                !denied.Contains("distinguishedName"), allowUntrustedCertificate));
+                allowUntrustedCertificate));
             return ExecResult.Success(new
             {
                 server = skill.LdapServer,
@@ -184,7 +155,7 @@ public sealed class LdapQueryExecutor
 
     private static List<Dictionary<string, object?>> Search(string host, int port, string username, string password,
         string dn, string filter, SearchScope scope, List<string> attrs, int limit, int seconds,
-        bool includeDistinguishedName, bool allowUntrustedCertificate)
+        bool allowUntrustedCertificate)
     {
         using var connection = new LdapConnection(new LdapDirectoryIdentifier(host, port));
         connection.AuthType = AuthType.Basic;
@@ -230,8 +201,7 @@ public sealed class LdapQueryExecutor
             foreach (SearchResultEntry entry in response.Entries)
             {
                 var item = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                if (includeDistinguishedName)
-                    item["distinguishedName"] = entry.DistinguishedName;
+                item["distinguishedName"] = entry.DistinguishedName;
                 foreach (DirectoryAttribute attribute in entry.Attributes.Values)
                 {
                     var values = attribute.GetValues(typeof(string)).Cast<string>().ToArray();
@@ -269,11 +239,7 @@ public sealed class LdapQueryExecutor
         foreach (var ch in text)
             b.Append(ch switch
             {
-                '*' => @"\2a",
-                '(' => @"\28",
-                ')' => @"\29",
-                '\\' => @"\5c",
-                '\0' => @"\00",
+                '*' => @"\2a", '(' => @"\28", ')' => @"\29", '\\' => @"\5c", '\0' => @"\00",
                 _ => ch.ToString()
             });
         return b.ToString();

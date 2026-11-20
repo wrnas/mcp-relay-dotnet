@@ -58,6 +58,7 @@ public class Program
         builder.Services.AddSingleton<ApprovalQueue>();
         builder.Services.AddSingleton<ApprovalWebSessions>();
         builder.Services.AddSingleton<LdapQueryExecutor>();
+        builder.Services.AddSingleton<LdapMutationExecutor>();
         builder.Services.AddSingleton<SkillRegistry>();
         builder.Services.AddHttpClient();
         builder.Services.AddEndpointsApiExplorer();

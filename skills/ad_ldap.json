@@ -2,47 +2,953 @@
   "ad_ldap_get_user": {
     "desc": "按AD登录账号查询用户姓名、邮箱、部门、启用状态与锁定状态（只读）",
     "domain": "active-directory",
-    "params": { "username": "string sAMAccountName登录账号" },
+    "params": {
+      "username": "string sAMAccountName登录账号"
+    },
     "ldap_server": "CORP_AD",
     "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
     "ldap_scope": "sub",
-    "ldap_attributes": ["sAMAccountName", "displayName", "mail", "department", "title", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "pwdLastSet"],
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userAccountControl",
+      "msDS-User-Account-Control-Computed",
+      "accountExpires",
+      "pwdLastSet"
+    ],
     "risk": "read"
   },
   "ad_ldap_search_users": {
     "desc": "按姓名片段查询AD用户，返回匹配用户的登录名与邮箱（只读，姓名片段按字面值匹配）",
     "domain": "active-directory",
-    "params": { "name": "string 用户显示姓名片段" },
+    "params": {
+      "name": "string 用户显示姓名片段"
+    },
     "ldap_server": "CORP_AD",
     "ldap_filter": "(&(objectCategory=person)(objectClass=user)(displayName=*{name}*))",
-    "ldap_attributes": ["sAMAccountName", "displayName", "mail", "department"],
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department"
+    ],
     "risk": "read"
   },
   "ad_ldap_get_user_groups": {
     "desc": "根据登录账号查询AD用户直接所属组的DN（不包含嵌套组或主组）",
     "domain": "active-directory",
-    "params": { "username": "string AD登录账号" },
+    "params": {
+      "username": "string AD登录账号"
+    },
     "ldap_server": "CORP_AD",
     "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
-    "ldap_attributes": ["sAMAccountName", "displayName", "memberOf"],
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "memberOf"
+    ],
     "risk": "read"
   },
   "ad_ldap_get_group_members": {
     "desc": "查询指定AD组直接成员的DN（不包含嵌套组展开，特别大的组可能使用AD范围属性返回策略）",
     "domain": "active-directory",
-    "params": { "groupName": "string AD组CN名称" },
+    "params": {
+      "groupName": "string AD组CN名称"
+    },
     "ldap_server": "CORP_AD",
     "ldap_filter": "(&(objectCategory=group)(cn={groupName}))",
-    "ldap_attributes": ["cn", "member"],
+    "ldap_attributes": [
+      "cn",
+      "member"
+    ],
     "risk": "read"
   },
   "ad_ldap_check_user_status": {
     "desc": "查询AD用户是否启用、是否锁定和账户过期原始值（锁定状态依赖域控返回computed属性）",
     "domain": "active-directory",
-    "params": { "username": "string AD登录账号" },
+    "params": {
+      "username": "string AD登录账号"
+    },
     "ldap_server": "CORP_AD",
     "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
-    "ldap_attributes": ["sAMAccountName", "userAccountControl", "msDS-User-Account-Control-Computed", "accountExpires", "lockoutTime"],
+    "ldap_attributes": [
+      "sAMAccountName",
+      "userAccountControl",
+      "msDS-User-Account-Control-Computed",
+      "accountExpires",
+      "lockoutTime"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_by_upn": {
+    "desc": "按用户主体名称UPN精确查询用户（只读）",
+    "domain": "active-directory",
+    "params": {
+      "upn": "string 如 user@dhc.com.cn"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(userPrincipalName={upn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "userAccountControl",
+      "manager",
+      "memberOf"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_by_email": {
+    "desc": "按邮箱精确查找用户（只读；邮箱可能不是唯一值）",
+    "domain": "active-directory",
+    "params": {
+      "email": "string 邮箱地址"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(mail={email}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "manager"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_by_dn": {
+    "desc": "按完整用户DN查询；用于复合流程核实唯一对象（只读）",
+    "domain": "active-directory",
+    "params": {
+      "userDn": "string 用户完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(distinguishedName={userDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "memberOf",
+      "primaryGroupID",
+      "manager"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_users_by_login": {
+    "desc": "按登录名片段搜索用户（只读）",
+    "domain": "active-directory",
+    "params": {
+      "name": "string sAMAccountName片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName=*{name}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_users_by_department": {
+    "desc": "按部门字段精确查找用户；department不等于OU（只读）",
+    "domain": "active-directory",
+    "params": {
+      "department": "string department属性值"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(department={department}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "manager"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_users_by_title": {
+    "desc": "按职位名称精确查找用户（只读）",
+    "domain": "active-directory",
+    "params": {
+      "title": "string title属性值"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(title={title}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_by_employee_id": {
+    "desc": "按employeeID精确查找用户（只读）",
+    "domain": "active-directory",
+    "params": {
+      "employeeId": "string employeeID属性值"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(employeeID={employeeId}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "employeeID"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_contacts": {
+    "desc": "按登录名查询用户联系方式；仅返回指定办公联系属性（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "telephoneNumber",
+      "mobile",
+      "physicalDeliveryOfficeName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_org": {
+    "desc": "按登录名查询部门、公司、直属经理及所在DN（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "company",
+      "manager",
+      "physicalDeliveryOfficeName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_password_metadata": {
+    "desc": "查询密码设置时间、密码修改要求及登录时间原始值；非密码内容（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "pwdLastSet",
+      "badPwdCount",
+      "badPasswordTime",
+      "lastLogonTimestamp",
+      "accountExpires",
+      "userAccountControl"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_user_primary_group_id": {
+    "desc": "查询用户primaryGroupID；不是直接列出主组名称（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "primaryGroupID",
+      "memberOf"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_disabled_users": {
+    "desc": "查找被禁用的AD用户（只读；最多返回MaxResults条）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=2))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "userAccountControl"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_enabled_users": {
+    "desc": "查找未被禁用的AD用户（只读；不代表账号一定可登录）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "userAccountControl"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_users_password_must_change": {
+    "desc": "查询pwdLastSet=0的用户；通常表示要求下次登录修改密码（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(pwdLastSet=0))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "pwdLastSet",
+      "userAccountControl"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_users_missing_mail": {
+    "desc": "查找未设置mail属性的用户（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(!(mail=*)))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "department",
+      "userPrincipalName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_direct_reports": {
+    "desc": "按直属经理DN查询直接下属；不含多级下属（只读）",
+    "domain": "active-directory",
+    "params": {
+      "managerDn": "string 经理完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(manager={managerDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName",
+      "manager"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_by_sam": {
+    "desc": "按组sAMAccountName查找组的基本信息（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupSam": "string 组sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(sAMAccountName={groupSam}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_by_dn": {
+    "desc": "按完整组DN查找唯一组对象；建议作为写操作前置核实（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupDn": "string 组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(distinguishedName={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_groups": {
+    "desc": "按组CN片段搜索组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "name": "string 组CN名称片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(cn=*{name}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_groups_by_description": {
+    "desc": "按组描述片段搜索组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "text": "string description片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(description=*{text}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_details": {
+    "desc": "按组sAMAccountName读取详细属性；member成员请用专用查询（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupSam": "string 组sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(sAMAccountName={groupSam}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged",
+      "whenCreated"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_parent_groups": {
+    "desc": "查询指定组直接所属的上级组DN（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupDn": "string 组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(distinguishedName={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "cn",
+      "sAMAccountName",
+      "memberOf"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_groups_for_user_direct": {
+    "desc": "按用户DN返回直接包含该用户的组对象；不含主组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "userDn": "string 用户完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(member={userDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_groups_for_user_nested": {
+    "desc": "按用户DN查询直接/嵌套所属组（只读；不含主组，复杂目录可能较慢）",
+    "domain": "active-directory",
+    "params": {
+      "userDn": "string 用户完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:={userDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_check_user_in_group_direct": {
+    "desc": "根据用户登录名和目标组完整DN判断直接成员关系；returned=1为命中（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName",
+      "groupDn": "string 目标组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username})(memberOf={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "memberOf"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_check_user_in_group_nested": {
+    "desc": "根据用户登录名和目标组DN判断直接/嵌套成员关系；不含主组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "username": "string sAMAccountName",
+      "groupDn": "string 目标组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(sAMAccountName={username})(memberOf:1.2.840.113556.1.4.1941:={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_list_security_groups": {
+    "desc": "查询安全组；组类型标志位包含SECURITY_ENABLED（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(groupType:1.2.840.113556.1.4.803:=2147483648))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_list_distribution_groups": {
+    "desc": "查询非安全组（通常为通讯组）（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(!(groupType:1.2.840.113556.1.4.803:=2147483648)))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_direct_user_details": {
+    "desc": "以组DN返回直接所属的用户基本信息；不返回子组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupDn": "string 目标组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(memberOf={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_nested_user_details": {
+    "desc": "以组DN返回直接/嵌套所属的用户信息；不含主组（只读；性能较重）",
+    "domain": "active-directory",
+    "params": {
+      "groupDn": "string 目标组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=person)(objectClass=user)(memberOf:1.2.840.113556.1.4.1941:={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "displayName",
+      "mail",
+      "department",
+      "title",
+      "userPrincipalName"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_group_direct_subgroups": {
+    "desc": "查询目标组直接包含的子组（只读）",
+    "domain": "active-directory",
+    "params": {
+      "groupDn": "string 目标组完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=group)(memberOf={groupDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "description",
+      "groupType",
+      "managedBy",
+      "memberOf",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_ous": {
+    "desc": "按OU名称片段搜索组织单位（只读）",
+    "domain": "active-directory",
+    "params": {
+      "name": "string OU名称片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectClass=organizationalUnit)(ou=*{name}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "ou",
+      "description",
+      "managedBy",
+      "whenCreated",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_ou_by_dn": {
+    "desc": "按完整DN查询组织单位；用于移动用户前确认目标OU（只读）",
+    "domain": "active-directory",
+    "params": {
+      "ouDn": "string OU完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectClass=organizationalUnit)(distinguishedName={ouDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "ou",
+      "description",
+      "managedBy",
+      "whenCreated",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_list_ous": {
+    "desc": "列出OU基本信息（只读；受MaxResults限制）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(objectClass=organizationalUnit)",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "ou",
+      "description",
+      "managedBy",
+      "whenCreated",
+      "whenChanged"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_container_by_dn": {
+    "desc": "按完整DN查询AD容器（例如CN=Users；容器不等于OU）（只读）",
+    "domain": "active-directory",
+    "params": {
+      "containerDn": "string 容器完整DN"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectClass=container)(distinguishedName={containerDn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "cn",
+      "description",
+      "whenCreated"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_computer_by_sam": {
+    "desc": "按计算机sAMAccountName精确查找，通常包含末尾$（只读）",
+    "domain": "active-directory",
+    "params": {
+      "computerSam": "string 例如 PC001$"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(sAMAccountName={computerSam}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_computer_by_dns": {
+    "desc": "按计算机DNS主机名精确查找（只读）",
+    "domain": "active-directory",
+    "params": {
+      "fqdn": "string 计算机完整DNS名称"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(dNSHostName={fqdn}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_computers": {
+    "desc": "按计算机CN片段搜索（只读）",
+    "domain": "active-directory",
+    "params": {
+      "name": "string 计算机CN名称片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(cn=*{name}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_computers_by_os": {
+    "desc": "按操作系统描述片段搜索计算机（只读）",
+    "domain": "active-directory",
+    "params": {
+      "os": "string 操作系统名称片段，如 Windows Server"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(operatingSystem=*{os}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_disabled_computers": {
+    "desc": "查找禁用的计算机账号（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=2))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_find_domain_controllers": {
+    "desc": "按SERVER_TRUST_ACCOUNT标志查询域控制器计算机账号（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "operatingSystem",
+      "operatingSystemVersion",
+      "description",
+      "userAccountControl",
+      "lastLogonTimestamp"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_domain_basic": {
+    "desc": "读取本域根对象基本信息（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(objectClass=domainDNS)",
+    "ldap_scope": "base",
+    "ldap_attributes": [
+      "dc",
+      "description",
+      "whenCreated",
+      "whenChanged",
+      "msDS-Behavior-Version"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_search_contacts": {
+    "desc": "按显示姓名片段查找AD联系人（只读）",
+    "domain": "active-directory",
+    "params": {
+      "name": "string 联系人名称片段"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectClass=contact)(displayName=*{name}*))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "cn",
+      "displayName",
+      "mail",
+      "company",
+      "department",
+      "telephoneNumber"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_contact_by_email": {
+    "desc": "按邮箱查找AD联系人（只读）",
+    "domain": "active-directory",
+    "params": {
+      "email": "string 联系人邮箱"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(objectClass=contact)(mail={email}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "cn",
+      "displayName",
+      "mail",
+      "company",
+      "telephoneNumber"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_list_managed_service_accounts": {
+    "desc": "查询托管服务账号和组托管服务账号的公开元数据；不读取密码（只读）",
+    "domain": "active-directory",
+    "params": {},
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(|(objectClass=msDS-ManagedServiceAccount)(objectClass=msDS-GroupManagedServiceAccount))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "description",
+      "whenCreated"
+    ],
+    "risk": "read"
+  },
+  "ad_ldap_get_managed_service_account_by_sam": {
+    "desc": "按sAMAccountName查询托管服务账号公开元数据（只读）",
+    "domain": "active-directory",
+    "params": {
+      "accountSam": "string 托管服务账号sAMAccountName"
+    },
+    "ldap_server": "CORP_AD",
+    "ldap_filter": "(&(|(objectClass=msDS-ManagedServiceAccount)(objectClass=msDS-GroupManagedServiceAccount))(sAMAccountName={accountSam}))",
+    "ldap_scope": "sub",
+    "ldap_attributes": [
+      "sAMAccountName",
+      "cn",
+      "dNSHostName",
+      "description"
+    ],
     "risk": "read"
   }
 }

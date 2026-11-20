@@ -19,6 +19,7 @@ public sealed class SkillRegistry : IDisposable
     private readonly IConfiguration _config;
     private readonly ApprovalQueue _approvals;
     private readonly LdapQueryExecutor _ldap;
+    private readonly LdapMutationExecutor _ldapWrite;
     private readonly ILogger<SkillRegistry> _logger;
     private readonly string _skillsDir;
     private readonly object _reloadGate = new();
@@ -26,11 +27,12 @@ public sealed class SkillRegistry : IDisposable
     private Dictionary<string, SkillDefinition> _skills = new(StringComparer.OrdinalIgnoreCase);
     private FileSystemWatcher? _watcher;
 
-    public SkillRegistry(IWebHostEnvironment env, IConfiguration config, ApprovalQueue approvals, LdapQueryExecutor ldap, ILogger<SkillRegistry> logger)
+    public SkillRegistry(IWebHostEnvironment env, IConfiguration config, ApprovalQueue approvals, LdapQueryExecutor ldap, LdapMutationExecutor ldapWrite, ILogger<SkillRegistry> logger)
     {
         _config = config;
         _approvals = approvals;
         _ldap = ldap;
+        _ldapWrite = ldapWrite;
         _logger = logger;
         _skillsDir = Path.Combine(env.ContentRootPath, "skills");
         if (!Directory.Exists(_skillsDir))
@@ -145,6 +147,7 @@ public sealed class SkillRegistry : IDisposable
             "rest" => backend.Method != "GET",
             "soap" or "powershell" => true,
             "ldap" => false,
+            "ldap_write" => true,
             "sql" => !SqlSafety.IsReadOnly(backend.SqlTemplate, out _),
             _ => true
         };
@@ -153,7 +156,9 @@ public sealed class SkillRegistry : IDisposable
         var isWrite = sqlIsWrite || simple.Risk == "write" || (simple.Risk is null && defaultWrite);
 
         if (backend.Protocol == "ldap" && simple.Risk == "write")
-            throw new FormatException($"{name}: LDAP 第一阶段只支持只读查询，不能配置 risk=write");
+            throw new FormatException($"{name}: ldap_filter 是只读查询，不能配置 risk=write");
+        if (backend.Protocol == "ldap_write" && simple.Risk != "write")
+            throw new FormatException($"{name}: ldap_action 必须显式配置 risk=write");
 
         if (backend.Protocol == "powershell" && LegacyPsPlaceholder.IsMatch(backend.ScriptTemplate ?? ""))
             throw new FormatException($"{name}: PowerShell 不再支持 {{参数}} 字符串替换，请使用 $参数 变量");
@@ -173,9 +178,14 @@ public sealed class SkillRegistry : IDisposable
 
     private static BackendConfig? BuildBackend(SimpleSkill s)
     {
-        var count = new[] { s.Get, s.Post, s.Put, s.Delete, s.Soap, s.SqlTemplate, s.Script, s.LdapFilter }
+        var count = new[] { s.Get, s.Post, s.Put, s.Delete, s.Soap, s.SqlTemplate, s.Script, s.LdapFilter, s.LdapAction }
             .Count(x => x != null);
-        if (count != 1) throw new FormatException("必须且只能配置一个执行方式 get/post/put/delete/soap/sql/script/ldap_filter");
+        if (count != 1) throw new FormatException("必须且只能配置一个执行方式 get/post/put/delete/soap/sql/script/ldap_filter/ldap_action");
+        if (s.LdapAction is not null)
+        {
+            LdapMutationExecutor.ValidateSkillTemplate(s.LdapServer, s.LdapAction, s.Params);
+            return new() { Protocol = "ldap_write", LdapServer = s.LdapServer, LdapAction = s.LdapAction };
+        }
         if (s.LdapFilter is not null)
         {
             LdapQueryExecutor.ValidateSkillTemplate(s.LdapServer, s.LdapFilter, s.LdapAttributes, s.LdapScope, s.LdapBaseDn, s.Params);
@@ -288,6 +298,12 @@ public sealed class SkillRegistry : IDisposable
         if (skill is null || !skill.Enabled)
             return Task.FromResult(ExecResult.Fail("NOT_FOUND", $"技能 {toolName} 不存在或已禁用", 404));
 
+        // 统一按服务器配置禁用 AD 操作；匹配 ldap_action 或完整 Skill 名。
+        // 在创建审批任务前检查，避免禁用操作进入待审批队列。
+        var disabled = CheckAdOperationDisabled(skill);
+        if (disabled is not null)
+            return Task.FromResult(disabled);
+
         var validation = ValidateArguments(skill.InputSchema, args);
         if (validation is not null)
             return Task.FromResult(ExecResult.Fail("INVALID_PARAMS", validation, 400));
@@ -344,6 +360,26 @@ public sealed class SkillRegistry : IDisposable
         return ExecuteBackendAsync(skill, args, httpFactory);
     }
 
+    // 支持 DisabledOperations 中写动作名（例如 delete_user）或 Skill 名（例如 ad_delete_user）。
+    // 只读查询可按 Skill 名禁用；其他非 AD Skill 不受影响。
+    private ExecResult? CheckAdOperationDisabled(SkillDefinition skill)
+    {
+        var backend = skill.Backend;
+        if (backend?.Protocol is not ("ldap" or "ldap_write"))
+            return null;
+        var section = _config.GetSection($"ActiveDirectory:Servers:{backend.LdapServer}:DisabledOperations");
+        var operations = section.Get<string[]>() ?? Array.Empty<string>();
+        var action = backend.LdapAction;
+        if (operations.Any(value =>
+                !string.IsNullOrWhiteSpace(value) &&
+                (string.Equals(value.Trim(), skill.ToolName, StringComparison.OrdinalIgnoreCase) ||
+                 (!string.IsNullOrWhiteSpace(action) &&
+                  string.Equals(value.Trim(), action, StringComparison.OrdinalIgnoreCase)))))
+            return ExecResult.Fail("AD_OPERATION_DISABLED",
+                $"AD 操作 {skill.ToolName} 已被 DisabledOperations 禁用", 403);
+        return null;
+    }
+
     private static string BuildApprovalSummary(SkillDefinition skill, JsonElement args)
     {
         var values = new Dictionary<string, string>();
@@ -360,6 +396,7 @@ public sealed class SkillRegistry : IDisposable
             "soap" => $"SOAP method={backend.SoapMethod ?? backend.SoapAction}",
             "powershell" => $"PowerShell target={backend.PowerShellTarget}",
             "ldap" => $"LDAP server={backend.LdapServer}",
+            "ldap_write" => $"AD action={backend.LdapAction}, server={backend.LdapServer}",
             _ => backend.Protocol ?? "unknown"
         };
         return $"Skill: {skill.ToolName}\nDescription: {skill.Description}\nAction: {action}\nArgs: {JsonSerializer.Serialize(values)}";
@@ -402,6 +439,10 @@ public sealed class SkillRegistry : IDisposable
 
     private async Task<ExecResult> ExecuteBackendAsync(SkillDefinition skill, JsonElement args, IHttpClientFactory httpFactory)
     {
+        // 审批完成时重新读取禁用列表：防止等待审批期间操作被禁用后仍执行。
+        var disabled = CheckAdOperationDisabled(skill);
+        if (disabled is not null)
+            return disabled;
         try
         {
             return skill.Backend?.Protocol switch
@@ -412,6 +453,7 @@ public sealed class SkillRegistry : IDisposable
                     skill.Backend.SqlTemplate!, args, _logger),
                 "powershell" => await ExecutePowerShellAsync(skill, args),
                 "ldap" => await _ldap.ExecuteAsync(skill.Backend!, args),
+                "ldap_write" => await _ldapWrite.ExecuteAsync(skill.Backend!, args),
                 _ => ExecResult.Fail("BACKEND_ERROR", "不支持的执行协议", 500)
             };
         }

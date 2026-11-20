@@ -112,6 +112,10 @@ namespace RelayMcp
         [JsonPropertyName("ldap_filter")]
         public string? LdapFilter { get; set; }
 
+        // 固定 AD 写入动作，与 ldap_filter 互斥。
+        [JsonPropertyName("ldap_action")]
+        public string? LdapAction { get; set; }
+
         [JsonPropertyName("ldap_attributes")]
         public List<string>? LdapAttributes { get; set; }
 
@@ -259,6 +263,7 @@ namespace RelayMcp
 
         public string? LdapServer { get; set; }
         public string? LdapFilter { get; set; }
+        public string? LdapAction { get; set; }
         public List<string>? LdapAttributes { get; set; }
         public string? LdapScope { get; set; }
         public string? LdapBaseDn { get; set; }
