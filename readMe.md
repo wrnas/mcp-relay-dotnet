@@ -446,6 +446,18 @@ skills/
 
 不同文件不要使用相同的 Skill 名称；重名时只保留先加载的一份并记录警告。
 
+### 7.2 命名规范
+
+- 每个业务系统一个 JSON：`ad.json`、`hr.json`、`exchange.json`、`erp.json`、`oa.json`。
+- 文件名使用小写英文字母、数字及下划线，推荐以字母开头。
+- Skill 名以系统标识开头：`ad_get_user`、`hr_get_employee`。
+- **已有 Skill 不要求重命名**。例如 `ad_ldap_get_user_groups` 已经以 `ad_` 开头，可以保留原调用名称。
+- `system` **自动等于 JSON 文件名（去掉 `.json`）**，不需要在每个 Skill 中重复配置。
+- `domain` 是 Skill 的可选业务分类字段，例如已有 AD Skill 的 `domain` 为 `active-directory`。它继续显示，但**按系统筛选时以文件名得到的 `system` 为准**，不是以 `domain` 字段为准。
+
+
+
+
 ### 7.2 通用字段
 
 | 字段 | 用途 |
@@ -454,7 +466,7 @@ skills/
 | `desc` | 告诉 AI 何时调用、返回什么信息 |
 | `params` | 参数及类型描述，例如 `"code": "string 员工编号"` |
 | `domain` | 业务域，可选 |
-| `enabled` | 是否启用，默认 `true` |
+| `enabled` | 是否启用，默认 `true`,如果为false 则不会在 GetList 时被列举 |
 | `risk` | `read` 或 `write`，说明操作风险 |
 | `get`、`post`、`put`、`delete` | REST 执行入口，四选一 |
 | `soap` | SOAP 服务地址 |

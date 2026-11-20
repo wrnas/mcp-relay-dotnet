@@ -118,7 +118,7 @@ public sealed class SkillRegistry : IDisposable
         }
     }
 
-    private SkillDefinition ToDefinition(string name, SimpleSkill simple, string domain)
+    private SkillDefinition ToDefinition(string name, SimpleSkill simple, string system)
     {
         if (simple.Params != null && simple.Params.Keys.Any(k => !ParameterName.IsMatch(k)))
             throw new FormatException($"{name}: 参数名只能使用英文字母、数字、下划线，且不能以数字开头");
@@ -167,7 +167,8 @@ public sealed class SkillRegistry : IDisposable
         {
             ToolName = name,
             Description = simple.Desc,
-            Domain = simple.Domain ?? domain,
+            Domain = simple.Domain ?? system,
+            System = system,
             InputSchema = BuildSchema(simple.Params),
             Backend = backend,
             Enabled = simple.Enabled,
@@ -257,23 +258,106 @@ public sealed class SkillRegistry : IDisposable
         lock (_reloadGate) return _skills.TryGetValue(name, out var skill) ? skill : null;
     }
 
+    // 文件名就是业务系统标识：skills/ad.json => system=ad。
+    // 不依赖单个 Skill 的 domain 字段；domain 仍保留原来的业务分类含义。
+    public List<SkillSystemSummary> ListSystems()
+    {
+        lock (_reloadGate)
+        {
+            return _skills.Values.Where(s => s.Enabled)
+                .GroupBy(s => s.System, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new SkillSystemSummary(g.Key, g.Count()))
+                .ToList();
+        }
+    }
+
+    // 不提供 query 时返回全部已启用 Skill（只含摘要，不加载参数 Schema）。
+    public List<SkillSummary> ListAll()
+    {
+        lock (_reloadGate)
+        {
+            return _skills.Values.Where(s => s.Enabled)
+                .OrderBy(s => s.System, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)
+                .Select(ToSummary)
+                .ToList();
+        }
+    }
+
+    // 系统精确匹配：不受 top_k 影响，返回该系统全部启用 Skill。
+    public List<SkillSummary> ListBySystem(string system)
+    {
+        var name = system?.Trim() ?? "";
+        lock (_reloadGate)
+        {
+            return _skills.Values
+                .Where(s => s.Enabled && s.System.Equals(name, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)
+                .Select(ToSummary)
+                .ToList();
+        }
+    }
+
+    // 已定位业务系统后再按关键词筛选：GET /skills?domain=ad&query=用户。
+    // 仅关键词搜索使用 top_k；若 query 为空，请调用 ListBySystem 返回系统全量目录。
+    public List<SkillSummary> SearchInSystem(string system, string query, int topK)
+    {
+        var name = system?.Trim() ?? "";
+        var q = query?.Trim() ?? "";
+        var words = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        lock (_reloadGate)
+        {
+            var candidates = _skills.Values
+                .Where(s => s.Enabled && s.System.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return candidates.Select(s => new { Skill = s, Score = Score(s, q, words) })
+                .Where(x => x.Score > 0)
+                .OrderByDescending(x => x.Score)
+                .ThenBy(x => x.Skill.ToolName, StringComparer.OrdinalIgnoreCase)
+                .Take(Math.Clamp(topK, 1, 50))
+                .Select(x => ToSummary(x.Skill))
+                .ToList();
+        }
+    }
+
     public List<SkillSummary> Search(string query, int topK)
     {
         var q = query?.Trim() ?? "";
         var words = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         lock (_reloadGate)
         {
-            var candidates = _skills.Values.Where(s => s.Enabled);
+            var candidates = _skills.Values.Where(s => s.Enabled).ToList();
+
+            // 兼容原有 Python MCP 的 GetSkillList(query, top_k)：
+            // GetSkillList(query="ad", top_k=8) 将返回 ad.json 的所有 Skill，
+            // 不需要先修改现有 MCP 客户端的默认 top_k。
+            if (q.Length == 0)
+                return candidates.OrderBy(s => s.System, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)
+                    .Select(ToSummary).ToList();
+            if (candidates.Any(s => s.System.Equals(q, StringComparison.OrdinalIgnoreCase)))
+                return candidates.Where(s => s.System.Equals(q, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)
+                    .Select(ToSummary).ToList();
+
+            // 普通关键词搜索仍保留原来的 top_k 限制，避免无关结果过多。
             return candidates
                 .Select(s => new { Skill = s, Score = Score(s, q, words) })
-                .Where(x => string.IsNullOrEmpty(q) || x.Score > 0)
+                .Where(x => x.Score > 0)
                 .OrderByDescending(x => x.Score)
                 .ThenBy(x => x.Skill.ToolName, StringComparer.OrdinalIgnoreCase)
                 .Take(Math.Clamp(topK, 1, 50))
-                .Select(x => new SkillSummary(x.Skill.ToolName, x.Skill.Description, x.Skill.Domain))
+                .Select(x => ToSummary(x.Skill))
                 .ToList();
         }
     }
+
+    private static SkillSummary ToSummary(SkillDefinition skill) =>
+        new(skill.ToolName, skill.Description, skill.Domain)
+        {
+            system = skill.System,
+            risk = skill.IsWrite ? "write" : "read"
+        };
 
     private static int Score(SkillDefinition s, string query, string[] words)
     {
@@ -283,6 +367,7 @@ public sealed class SkillRegistry : IDisposable
         if (s.ToolName.Contains(query, StringComparison.OrdinalIgnoreCase)) score += 30;
         if (s.Description?.Contains(query, StringComparison.OrdinalIgnoreCase) == true) score += 20;
         if (s.Domain?.Contains(query, StringComparison.OrdinalIgnoreCase) == true) score += 10;
+        if (s.System.Contains(query, StringComparison.OrdinalIgnoreCase)) score += 10;
         foreach (var word in words)
         {
             if (s.ToolName.Contains(word, StringComparison.OrdinalIgnoreCase)) score += 8;

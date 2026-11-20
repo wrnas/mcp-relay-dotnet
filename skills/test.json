@@ -4,7 +4,7 @@
     "params": {
       "order_id": "string 订单号"
     },
-    "enabled": false,
+    "enabled": true,
     "get": "http://127.0.0.1:8080/api/orders/{order_id}",
     "risk": "read"
   },
@@ -16,7 +16,7 @@
       "remark": "?string 备注信息(可选)"
     },
     "post": "http://127.0.0.1:8080/api/orders/create",
-    "enabled": false,
+    "enabled": true,
     "risk": "write"
   },
   "ws_add_User": {

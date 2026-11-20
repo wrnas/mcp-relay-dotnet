@@ -161,6 +161,12 @@ namespace RelayMcp
         public string? Domain { get; set; }
 
         /// <summary>
+        /// 所属业务系统标识，直接取 Skill JSON 文件名（不含扩展名），例如 ad.json => ad。
+        /// 与可选的 domain 业务分类彼此独立，方便按系统发现工具。
+        /// </summary>
+        public string System { get; set; } = "";
+
+        /// <summary>
         /// 动态生成的 JSON Schema，供智能体识别参数格式。
         /// </summary>
         public JsonElement InputSchema { get; set; }
@@ -187,6 +193,7 @@ namespace RelayMcp
             tool_name = ToolName,
             description = Description,
             domain = Domain,
+            system = System,
             input_schema = InputSchema,
             protocol = Backend?.Protocol,
             risk = IsWrite ? "write" : "read"
@@ -301,7 +308,14 @@ namespace RelayMcp
     /// <summary>
     /// 返回给大模型的技能摘要信息（用于 GetSkillList）。
     /// </summary>
-    public record SkillSummary(string tool_name, string? description, string? domain);
+    public record SkillSummary(string tool_name, string? description, string? domain)
+    {
+        public string? system { get; init; }
+        public string? risk { get; init; }
+    }
+
+    // 业务系统目录：system 取 skills/<system>.json 的文件名。
+    public record SkillSystemSummary(string system, int skill_count);
 
     /// <summary>
     /// 网关内部统一的标准执行结果模型。
