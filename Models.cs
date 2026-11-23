@@ -125,9 +125,15 @@ namespace RelayMcp
         [JsonPropertyName("ldap_base_dn")]
         public string? LdapBaseDn { get; set; }
 
-        // local 为本机 PowerShell，exchange 为远程 Exchange。
+        // PowerShell 执行目标：local=本机，exchange=现有 Exchange，remote=普通 Windows WinRM。
+        // 不配置时继续使用旧版默认值 exchange，以兼容已有 Skill。
         [JsonPropertyName("powershell_target")]
         public string? PowerShellTarget { get; set; }
+
+        // 仅 powershell_target=remote 时使用：对应 appsettings.json 的 RemoteServers 下的固定别名。
+        // 不允许通过 AI 的 args 动态传 IP、URL 或账号，以限制远程执行范围。
+        [JsonPropertyName("powershell_server")]
+        public string? PowerShellServer { get; set; }
 
         // 用于接收 JSON 中的 PowerShell 脚本
         public string? Script { get; set; }
@@ -276,6 +282,9 @@ namespace RelayMcp
         public string? LdapBaseDn { get; set; }
 
         public string? PowerShellTarget { get; set; }
+
+        // 经审核的服务器别名；仅在 remote 模式下使用，不包含真实密码。
+        public string? PowerShellServer { get; set; }
 
         public string? HeaderName { get; set; }
 

@@ -1,0 +1,25 @@
+{
+  "windows_local_ipconfig": {
+    "desc": "查询运行 Relay 服务本机的网络配置（ipconfig /all）",
+    "enabled": true,
+    "risk": "read",
+    "powershell_target": "local",
+    "script": "ipconfig /all"
+  },
+  "windows_remote_ipconfig": {
+    "desc": "查询 SERVER01 远程 Windows 网络配置（ipconfig /all）",
+    "enabled": true,
+    "risk": "read",
+    "powershell_target": "remote",
+    "powershell_server": "SERVER01",
+    "script": "ipconfig /all"
+  },
+  "windows_remote_cmd_ipconfig": {
+    "desc": "通过 CMD 查询 SERVER01 远程 Windows 网络配置",
+    "enabled": true,
+    "risk": "read",
+    "powershell_target": "remote",
+    "powershell_server": "SERVER01",
+    "script": "cmd.exe /c ipconfig"
+  }
+}

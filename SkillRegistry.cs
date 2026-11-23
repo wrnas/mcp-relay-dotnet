@@ -206,9 +206,24 @@ public sealed class SkillRegistry : IDisposable
         if (s.Script is not null)
         {
             var target = s.PowerShellTarget ?? "exchange";
-            if (target != "local" && target != "exchange")
-                throw new FormatException("powershell_target 只能为 local 或 exchange");
-            return new() { Protocol = "powershell", ScriptTemplate = s.Script, PowerShellTarget = target };
+            if (target is not ("local" or "exchange" or "remote"))
+                throw new FormatException("powershell_target 只能为 local、exchange 或 remote");
+
+            // remote 必须由 Skill 作者静态指定服务器别名；绝不从调用者参数中取目标地址。
+            if (target == "remote" &&
+                (string.IsNullOrWhiteSpace(s.PowerShellServer) ||
+                 !ParameterName.IsMatch(s.PowerShellServer)))
+                throw new FormatException("remote PowerShell 必须配置合法的 powershell_server 服务器别名");
+            if (target != "remote" && !string.IsNullOrWhiteSpace(s.PowerShellServer))
+                throw new FormatException("powershell_server 仅可用于 powershell_target=remote");
+
+            return new()
+            {
+                Protocol = "powershell",
+                ScriptTemplate = s.Script,
+                PowerShellTarget = target,
+                PowerShellServer = s.PowerShellServer
+            };
         }
         return new()
         {
@@ -479,7 +494,9 @@ public sealed class SkillRegistry : IDisposable
             "sql" => $"SQL database={backend.DbAlias}",
             "rest" => $"REST method={backend.Method}",
             "soap" => $"SOAP method={backend.SoapMethod ?? backend.SoapAction}",
-            "powershell" => $"PowerShell target={backend.PowerShellTarget}",
+            // 审批页面明确显示远程目标，避免只看到脚本名、看不到执行位置。
+            "powershell" => $"PowerShell target={backend.PowerShellTarget}" +
+                            (backend.PowerShellTarget == "remote" ? $", server={backend.PowerShellServer}" : ""),
             "ldap" => $"LDAP server={backend.LdapServer}",
             "ldap_write" => $"AD action={backend.LdapAction}, server={backend.LdapServer}",
             _ => backend.Protocol ?? "unknown"
@@ -655,7 +672,8 @@ public sealed class SkillRegistry : IDisposable
         try
         {
             var backend = skill.Backend!;
-            using var runspace = CreatePowerShellRunspace(backend.PowerShellTarget);
+            // 同一个脚本执行入口；根据 Skill 中的固定目标创建不同类型的 Runspace。
+            using var runspace = CreatePowerShellRunspace(backend);
             runspace.Open();
             using var ps = PowerShell.Create();
             ps.Runspace = runspace;
@@ -721,9 +739,19 @@ public sealed class SkillRegistry : IDisposable
         return input.ToString();
     }
 
-    private Runspace CreatePowerShellRunspace(string? target)
+    /// <summary>
+    /// 创建 PowerShell 执行会话。
+    /// local / exchange 完全保留旧版实现；仅 remote 使用新增的多服务器 WinRM 配置。
+    /// </summary>
+    private Runspace CreatePowerShellRunspace(BackendConfig backend)
     {
-        if (target == "local") return RunspaceFactory.CreateRunspace();
+        if (backend.PowerShellTarget == "local")
+            return RunspaceFactory.CreateRunspace();
+
+        if (backend.PowerShellTarget == "remote")
+            return CreateRemoteWindowsRunspace(backend.PowerShellServer);
+
+        // 原 Exchange 专用连接方式不作改动，避免影响已有 Exchange Skill。
         var url = _config["PowerShellSettings:ExchangeServerUrl"];
         var username = _config["PowerShellSettings:Username"];
         var password = _config["PowerShellSettings:Password"];
@@ -735,6 +763,98 @@ public sealed class SkillRegistry : IDisposable
         var credentials = new PSCredential(username, secure);
         var connection = new WSManConnectionInfo(new Uri(url),
             "http://schemas.microsoft.com/powershell/Microsoft.Exchange", credentials);
+        return RunspaceFactory.CreateRunspace(connection);
+    }
+
+    /// <summary>
+    /// 创建普通 Windows 远程 PowerShell 会话（WinRM）。
+    ///
+    /// 简单配置：PowerShellSettings:RemoteServers:SERVER01:Host = "172.16.8.93"
+    /// 默认连接 http://172.16.8.93:5985/wsman，通过 Negotiate（非域环境通常是 NTLM）认证。
+    /// 兼容上一版补丁的 Url 写法，允许 HTTPS；HTTP 仅允许 Negotiate，不允许 Basic。
+    ///
+    /// 目标主机只能来自服务端配置的固定别名，不能由 API 调用者传任意 IP。
+    /// 远程账号密码只从 PasswordEnv 指向的环境变量取得，不放进 Skill JSON。
+    /// 本方法只负责创建连接；PowerShell 脚本参数绑定和审批流程保持原样。
+    /// </summary>
+    private Runspace CreateRemoteWindowsRunspace(string? serverAlias)
+    {
+        if (string.IsNullOrWhiteSpace(serverAlias) || !ParameterName.IsMatch(serverAlias))
+            throw new InvalidOperationException("远程 PowerShell 服务器别名无效");
+
+        var section = _config.GetSection($"PowerShellSettings:RemoteServers:{serverAlias}");
+        if (!section.Exists())
+            throw new InvalidOperationException("未配置指定的远程 PowerShell 服务器别名");
+
+        // Host 为最简单的配置方式：填写 IP 或计算机名，不带协议、端口和路径。
+        // Url 是兼容旧补丁的可选写法；二者不能同时填写，避免目标含糊。
+        var host = section["Host"]?.Trim();
+        var url = section["Url"]?.Trim();
+        if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException("远程 PowerShell Host 和 Url 只能填写一个");
+        if (string.IsNullOrWhiteSpace(host) && string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException("远程 PowerShell 缺少 Host 或 Url");
+
+        Uri endpoint;
+        if (!string.IsNullOrWhiteSpace(host))
+        {
+            // 禁止将用户名、URL、路径等放进 Host；简单模式固定 HTTP 5985。
+            if (host.Contains('/') || host.Contains('\\') || host.Contains(':') ||
+                host.Contains('@') || host.Contains('?') || host.Contains('#') ||
+                host.Any(char.IsWhiteSpace) || (Uri.CheckHostName(host) != UriHostNameType.Dns &&
+                 Uri.CheckHostName(host) != UriHostNameType.IPv4))
+                throw new InvalidOperationException("Host 只能是 IPv4 地址或 DNS 主机名");
+            endpoint = new Uri($"http://{host}:5985/wsman");
+        }
+        else if (!Uri.TryCreate(url, UriKind.Absolute, out endpoint))
+        {
+            throw new InvalidOperationException("远程 PowerShell Url 格式不正确");
+        }
+
+        // 只允许标准 WinRM 端点。若使用 HTTP，必须是 5985 + Negotiate；
+        // HTTPS 可以使用 5986，保留上版安全连接方式。
+        var isHttp = endpoint.Scheme == Uri.UriSchemeHttp;
+        var isHttps = endpoint.Scheme == Uri.UriSchemeHttps;
+        if ((!isHttp && !isHttps) ||
+            (isHttp && endpoint.Port != 5985) || (isHttps && endpoint.Port != 5986) ||
+            endpoint.AbsolutePath.TrimEnd('/') != "/wsman" ||
+            !string.IsNullOrEmpty(endpoint.UserInfo) ||
+            !string.IsNullOrEmpty(endpoint.Query) ||
+            !string.IsNullOrEmpty(endpoint.Fragment))
+            throw new InvalidOperationException("远程 PowerShell 仅支持 http://主机:5985/wsman 或 https://主机:5986/wsman");
+
+        var username = section["Username"];
+        var passwordEnv = section["PasswordEnv"];
+        var password = string.IsNullOrWhiteSpace(passwordEnv)
+            ? null : Environment.GetEnvironmentVariable(passwordEnv);
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(passwordEnv) ||
+            string.IsNullOrWhiteSpace(password))
+            throw new InvalidOperationException("远程 PowerShell 缺少 Username 或 PasswordEnv 对应的环境变量");
+
+        var auth = (section["Authentication"] ?? "Negotiate").Trim();
+        var mechanism = auth.ToLowerInvariant() switch
+        {
+            "negotiate" => AuthenticationMechanism.Negotiate,
+            "basic" when isHttps => AuthenticationMechanism.Basic,
+            "basic" => throw new InvalidOperationException("HTTP 5985 不允许 Basic，请使用 Negotiate"),
+            _ => throw new InvalidOperationException("远程 PowerShell Authentication 只支持 Negotiate，或 HTTPS 下的 Basic")
+        };
+
+        using var secure = new SecureString();
+        foreach (var character in password) secure.AppendChar(character);
+        secure.MakeReadOnly();
+        var credentials = new PSCredential(username, secure);
+        var connection = new WSManConnectionInfo(endpoint,
+            "http://schemas.microsoft.com/powershell/Microsoft.PowerShell", credentials)
+        {
+            AuthenticationMechanism = mechanism,
+            // SDK 超时单位是毫秒。这里使用秒配置，并限制在合理范围内。
+            OpenTimeout = Math.Clamp(section.GetValue("OpenTimeoutSeconds", 15), 1, 120) * 1000,
+            OperationTimeout = Math.Clamp(section.GetValue("OperationTimeoutSeconds", 60), 1, 300) * 1000
+        };
+
+        // 无域时通常还需在 .NET 所在 Windows 客户端 TrustedHosts 中添加目标 IP。
+        // 此处不自动更改系统 WinRM 配置，也不启用 AllowUnencrypted / Basic HTTP。
         return RunspaceFactory.CreateRunspace(connection);
     }
 

@@ -826,82 +826,75 @@ SQL 模板仍需人工审查；参数化可以保护参数值，但不能证明�
 
 ## 11. PowerShell 运维
 
-当前可通过固定脚本调用 PowerShell，主要面向本机 AD 管理模块和远程 Exchange 管理会话。
-
-### 11.1 本机执行：AD 查询
-
-文件：`skills/ad.json`（示意）
-
+当前可通过固定脚本调用 PowerShell，同时支持本地及远程服务器的连接。
+配置文件部分如下：
 ```json
-{
-  "ad_check_user": {
-    "desc": "根据账号名查询 AD 用户启用状态",
-    "params": {
-      "username": "string AD 登录名"
-    },
-    "script": "Get-ADUser -Identity $username -Properties Enabled | Select-Object Name, SamAccountName, Enabled",
-    "powershell_target": "local",
-    "risk": "read"
+"PowerShellSettings": {
+  "ExchangeServerUrl": "",
+  "Username": "",
+  "Password": "",
+  "RemoteServers": {
+    "SERVER01": {
+      "Host": "172.16.8.93",
+      "Username": "目标计算机名\\Administrator",
+      "PasswordEnv": "SERVER01_PASSWORD",
+      "Authentication": "Negotiate",
+      "OpenTimeoutSeconds": 15,
+      "OperationTimeoutSeconds": 60
+    }
   }
 }
 ```
+`SERVER01` 是自定义别名。`Host` 可以写 IPv4 或 DNS 计算机名，不要写 URL。`Username` 建议明确写成 `目标计算机名\Administrator` 这样的本地账户形式，JSON 中的反斜线要写成两个。账户必须有远程会话权限。`PasswordEnv` 是环境变量名称，并不是密码。
 
-使用前提：
+本补丁也兼容完整 `Url`，如 `"Url": "https://server01:5986/wsman"`，但不能与 `Host` 同时写。HTTP 5985 只允许 Negotiate，不启用 Basic 明文认证。
 
-- 运行 .NET 的机器具备相应 PowerShell 模块，例如 ActiveDirectory。
-- 运行服务的 Windows 身份具备相应查询权限。
-- 能连接 AD 域服务。
 
-**注意：** 包内 `skills/AD.json` 中的示例默认启用；没有 AD 环境时调用这些 Skill 可能失败。需要时可将其设为 `enabled: false`。
+### 11.1 目标服务器及服务端准备
 
-### 11.2 远程执行：Exchange 会话
-
-```json
-{
-  "exchange_check_mailbox": {
-    "desc": "查询 Exchange 邮箱基本信息",
-    "params": {
-      "identity": "string 邮箱地址或身份标识"
-    },
-    "script": "Get-Mailbox -Identity $identity | Select-Object Name, PrimarySmtpAddress, RecipientTypeDetails",
-    "powershell_target": "exchange",
-    "risk": "read"
-  }
-}
-```
-
-`exchange` 模式使用 `PowerShellSettings` 中的 `ExchangeServerUrl`、`Username` 和 `Password` 创建远程 Exchange Runspace。
-
-它不是任意 Windows 服务器的通用远程 PowerShell 工具，也不支持在 Skill 中自由指定目标 WinRM 主机。
-
-### 11.3 参数传递机制
-
-修复版不再支持旧式占位符直接拼接：
+在目标服务器以管理员身份执行：
 
 ```powershell
-# 旧版（不要继续使用）
-Get-ADUser -Identity '{username}'
+Enable-PSRemoting -Force
+winrm enumerate winrm/config/listener
 ```
 
-应改为：
+确认看到 `Transport = HTTP`、`Port = 5985`。将防火墙 5985 的入站来源限制为运行 Relay 的机器。
+
+在 **运行 .NET 服务的 Windows 电脑** 上，以管理员身份执行（不要在目标机执行）：
 
 ```powershell
-# 修复版
-Get-ADUser -Identity $username
+Test-NetConnection 172.168.0.100 -Port 5985
+Get-Item WSMan:\localhost\Client\TrustedHosts
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value '172.168.0.100' -Concatenate -Force
+$cred = Get-Credential
+Invoke-Command -ComputerName 172.168.0.100 -Port 5985 -Authentication Negotiate -Credential $cred -ScriptBlock { ipconfig /all }
 ```
 
-.NET 会创建脚本参数声明，并把传入值作为参数绑定，而不是把字符串直接嵌入命令源代码。
+`Get-Credential` 输入目标机器允许 WinRM 远程登录的本地账号（例如 `目标计算机名\Administrator`）。先确保以上命令可用，再通过 Swagger 测试。部分本地管理员账号会受远程 UAC 令牌过滤影响，必要时需要检查目标机器的权限/本地策略。不建议打开 `AllowUnencrypted` 或 HTTP Basic。
 
-但**参数绑定不代表任意脚本天然安全**。脚本内容必须由可信的运维人员编写、审查，并限制运行账号权限。
+如果 .NET 运行在 Linux 或容器中，Windows TrustedHosts 步骤不适用，且该环境的 WinRM/NTLM 支持要单独验证；本补丁主要面向 Windows 上运行的 Relay。
 
-### 11.4 PowerShell 的安全建议
+### 11.2 设置密码与启动 .NET
 
-- 仅把必要的固定脚本配置为 Skill。
-- 尽量只把 `Get-*` 查询脚本标记为 `read`，同时检查脚本实际调用的命令。
-- 修改组成员、权限、服务状态等操作应标记为 `write` 并人工审批。
-- 不要向 AI 暴露任意脚本执行入口。
-- 不要将高权限密码直接写进 Skill JSON。
-- 失败时先检查 WinRM、Exchange 版本、模块、运行账户和日志，不要反复重试有副作用的脚本。
+在启动 .NET 的同一个 PowerShell 窗口：
+
+```powershell
+$env:SERVER01_PASSWORD = '远程账号密码'
+$env:Relay__ApiKey = '你的API密钥'
+dotnet build
+dotnet run
+```
+注意 ：为了安全起见，密码只存在于当前终端进程及其子进程环境。如果 Relay 作为 Windows 服务运行，必须让服务进程本身拥有 `SERVER01_PASSWORD` 环境变量；设置后重启服务。不要把密码提交到 Git 或写入 Skill JSON。
+
+### 11.3 常见问题
+
+- `NOT_FOUND`：检查 Skill 是否放在运行目录的 `skills` 下面、是否启用、名称是否正确。
+- 提示 `PasswordEnv` 环境变量缺失：检查密码是否设置在运行 .NET 服务的进程环境，而不是 Swagger 的浏览器环境。
+- 连接失败：先验证 5985 可达，再手动执行 `Invoke-Command`；通常是 TrustedHosts、账号格式或权限、NTLM 策略等问题。
+- 输出乱码：`ipconfig` 的控制台编码在 PowerShell 远程会话中可能与返回编码不同；可以优先使用 PowerShell 原生命令如 `Get-NetIPConfiguration` 返回结构化结果。
+- HTTP + Negotiate 的 WinRM 消息通常有会话加密，但没有 HTTPS 的 TLS 服务器证书身份验证；TrustedHosts 也不提供服务器身份验证。请仅在可信网段使用并限制防火墙来源。
+- 本执行环境没有 `dotnet` 命令，尚未完成真实编译或 Windows WinRM 联调。请在你的 .NET 8 Windows 环境执行 `dotnet build`。
 
 ---
 
