@@ -709,9 +709,10 @@ public sealed class SkillRegistry : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("PowerShell Skill {Skill} failed: {Type}", skill.ToolName, ex.GetType().Name);
-            return ExecResult.Fail("EXECUTION_ERROR", $"PowerShell 执行失败 ({ex.GetType().Name})", 502);
+            _logger.LogWarning(ex, "PowerShell Skill {Skill} failed: {Message}", skill.ToolName, ex.Message);
+            return ExecResult.Fail("EXECUTION_ERROR", $"PowerShell 执行失败 ({ex.GetType().Name}: {ex.Message})", 502);
         }
+
     }
 
     private static object? ToSerializablePowerShellValue(object? input)
@@ -772,7 +773,10 @@ public sealed class SkillRegistry : IDisposable
     /// 简单配置：PowerShellSettings:RemoteServers:SERVER01:Host = "172.16.8.93"
     /// 默认连接 http://172.16.8.93:5985/wsman，通过 Negotiate（非域环境通常是 NTLM）认证。
     /// 兼容上一版补丁的 Url 写法，允许 HTTPS；HTTP 仅允许 Negotiate，不允许 Basic。
-    ///
+    ///1. 如果配置里写了 `PasswordEnv`：优先从环境变量读取密码；
+    ///2. 如果没有环境变量，但是配置存在 `_password`：读取该字段的值；
+    ///3. **程序启动日志警告⚠️：检测到明文密码配置，仅用于开发调试，生产环境禁止使用。**
+    /// 
     /// 目标主机只能来自服务端配置的固定别名，不能由 API 调用者传任意 IP。
     /// 远程账号密码只从 PasswordEnv 指向的环境变量取得，不放进 Skill JSON。
     /// 本方法只负责创建连接；PowerShell 脚本参数绑定和审批流程保持原样。
@@ -781,13 +785,10 @@ public sealed class SkillRegistry : IDisposable
     {
         if (string.IsNullOrWhiteSpace(serverAlias) || !ParameterName.IsMatch(serverAlias))
             throw new InvalidOperationException("远程 PowerShell 服务器别名无效");
-
         var section = _config.GetSection($"PowerShellSettings:RemoteServers:{serverAlias}");
         if (!section.Exists())
             throw new InvalidOperationException("未配置指定的远程 PowerShell 服务器别名");
 
-        // Host 为最简单的配置方式：填写 IP 或计算机名，不带协议、端口和路径。
-        // Url 是兼容旧补丁的可选写法；二者不能同时填写，避免目标含糊。
         var host = section["Host"]?.Trim();
         var url = section["Url"]?.Trim();
         if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(url))
@@ -798,7 +799,6 @@ public sealed class SkillRegistry : IDisposable
         Uri endpoint;
         if (!string.IsNullOrWhiteSpace(host))
         {
-            // 禁止将用户名、URL、路径等放进 Host；简单模式固定 HTTP 5985。
             if (host.Contains('/') || host.Contains('\\') || host.Contains(':') ||
                 host.Contains('@') || host.Contains('?') || host.Contains('#') ||
                 host.Any(char.IsWhiteSpace) || (Uri.CheckHostName(host) != UriHostNameType.Dns &&
@@ -811,8 +811,6 @@ public sealed class SkillRegistry : IDisposable
             throw new InvalidOperationException("远程 PowerShell Url 格式不正确");
         }
 
-        // 只允许标准 WinRM 端点。若使用 HTTP，必须是 5985 + Negotiate；
-        // HTTPS 可以使用 5986，保留上版安全连接方式。
         var isHttp = endpoint.Scheme == Uri.UriSchemeHttp;
         var isHttps = endpoint.Scheme == Uri.UriSchemeHttps;
         if ((!isHttp && !isHttps) ||
@@ -825,11 +823,26 @@ public sealed class SkillRegistry : IDisposable
 
         var username = section["Username"];
         var passwordEnv = section["PasswordEnv"];
-        var password = string.IsNullOrWhiteSpace(passwordEnv)
-            ? null : Environment.GetEnvironmentVariable(passwordEnv);
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(passwordEnv) ||
-            string.IsNullOrWhiteSpace(password))
-            throw new InvalidOperationException("远程 PowerShell 缺少 Username 或 PasswordEnv 对应的环境变量");
+        // ========== 新增代码开始 ==========
+        var devPlainPassword = section["_password"];
+        string? password = null;
+
+        if (!string.IsNullOrWhiteSpace(passwordEnv))
+        {
+            password = Environment.GetEnvironmentVariable(passwordEnv);
+        }
+
+        // 如果环境变量拿不到，并且配置存在 _password，则使用明文，输出警告日志
+        if (string.IsNullOrWhiteSpace(password) && !string.IsNullOrWhiteSpace(devPlainPassword))
+        {
+            password = devPlainPassword;
+            // 警告：明文密码模式，仅限开发调试，禁止生产使用
+            _logger.LogWarning("【开发调试警告】RemoteServers:{Alias} 使用配置文件明文 _password，生产环境请删除 _password，改用 PasswordEnv 环境变量！", serverAlias);
+        }
+        // ========== 新增代码结束 ==========
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+            throw new InvalidOperationException("远程 PowerShell 缺少 Username 或 PasswordEnv/_password 对应的密码");
 
         var auth = (section["Authentication"] ?? "Negotiate").Trim();
         var mechanism = auth.ToLowerInvariant() switch
@@ -848,15 +861,12 @@ public sealed class SkillRegistry : IDisposable
             "http://schemas.microsoft.com/powershell/Microsoft.PowerShell", credentials)
         {
             AuthenticationMechanism = mechanism,
-            // SDK 超时单位是毫秒。这里使用秒配置，并限制在合理范围内。
             OpenTimeout = Math.Clamp(section.GetValue("OpenTimeoutSeconds", 15), 1, 120) * 1000,
             OperationTimeout = Math.Clamp(section.GetValue("OperationTimeoutSeconds", 60), 1, 300) * 1000
         };
-
-        // 无域时通常还需在 .NET 所在 Windows 客户端 TrustedHosts 中添加目标 IP。
-        // 此处不自动更改系统 WinRM 配置，也不启用 AllowUnencrypted / Basic HTTP。
         return RunspaceFactory.CreateRunspace(connection);
     }
+
 
     public void Dispose()
     {
